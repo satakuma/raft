@@ -6,9 +6,7 @@ pub use domain::*;
 
 mod domain;
 
-pub struct Raft {
-    // TODO you can add fields to this struct.
-}
+pub struct Raft {}
 
 impl Raft {
     /// Registers a new `Raft` module in the `system`, initializes it and
@@ -39,4 +37,3 @@ impl Handler<ClientRequest> for Raft {
     }
 }
 
-// TODO you can implement handlers of messages of other types for the Raft struct.
