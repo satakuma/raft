@@ -93,8 +93,7 @@ where
         vec
     }
 
-    pub async fn set(&mut self, ind: usize, value: T) {
-        self.values[ind] = value;
+    async fn storage_set(&mut self, ind: usize) {
         self.storage
             .borrow_mut()
             .put(
@@ -103,6 +102,16 @@ where
             )
             .await
             .unwrap()
+    }
+
+    pub async fn set(&mut self, ind: usize, value: T) {
+        self.values[ind] = value;
+        self.storage_set(ind).await;
+    }
+
+    pub async fn push(&mut self, value: T) {
+        self.values.push(value);
+        self.storage_set(self.values.len() - 1).await;
     }
 }
 
