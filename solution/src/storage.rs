@@ -1,6 +1,6 @@
 //! StableStorage implementation.
 
-use crate::{StableStorage, LogEntry};
+use crate::{LogEntry, StableStorage};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,8 +20,12 @@ pub(crate) struct Log {
 impl Log {
     pub(crate) fn empty() -> Log {
         Log {
-            entries: Vec::new()
+            entries: Vec::new(),
         }
+    }
+
+    pub(crate) fn last_log_index(&self) -> usize {
+        self.entries.len() - 1
     }
 }
 
@@ -90,7 +94,8 @@ where
 
     async fn save(&self) {
         self.storage
-            .put(&self.name, &bincode::serialize(&self.value).unwrap()).await;
+            .put(&self.name, &bincode::serialize(&self.value).unwrap())
+            .await;
     }
 
     pub(crate) async fn set(&mut self, value: T) {
@@ -116,7 +121,9 @@ pub(crate) struct PersistentGuard<'a, T> {
 }
 
 impl<'a, T> PersistentGuard<'a, T>
-where T: Serialize + for<'de> Deserialize<'de> {
+where
+    T: Serialize + for<'de> Deserialize<'de>,
+{
     fn new(pvalue: &mut Persistent<T>) -> PersistentGuard<'_, T> {
         PersistentGuard {
             pvalue,

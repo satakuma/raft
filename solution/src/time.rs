@@ -3,7 +3,7 @@ use rand::Rng;
 use tokio::sync::oneshot;
 use tokio::time::{interval_at, Duration, Instant};
 
-use crate::{Raft, Node};
+use crate::{Raft, Server};
 
 /// Re-implementation of a timer, similar to what is implemented
 /// in the executor, but this one cancels the tick once dropped.
@@ -29,13 +29,17 @@ impl Timer {
         timer
     }
 
-    pub(crate) fn new_election_timer(node: &Node) -> Timer {
-        let dur = rand::thread_rng().gen_range(node.config.election_timeout_range.clone());
-        Timer::new(node.self_ref(), dur, Timeout::Election)
+    pub(crate) fn new_election_timer(server: &Server) -> Timer {
+        let dur = rand::thread_rng().gen_range(server.config.election_timeout_range.clone());
+        Timer::new(server.self_ref(), dur, Timeout::Election)
     }
 
-    pub(crate) fn new_heartbeat_timer(node: &Node) -> Timer {
-        Timer::new(node.self_ref(), node.config.heartbeat_timeout, Timeout::Election)
+    pub(crate) fn new_heartbeat_timer(server: &Server) -> Timer {
+        Timer::new(
+            server.self_ref(),
+            server.config.heartbeat_timeout,
+            Timeout::Election,
+        )
     }
 
     pub(crate) fn reset(&mut self) {

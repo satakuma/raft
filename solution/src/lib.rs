@@ -1,7 +1,7 @@
 #![allow(clippy::await_holding_refcell_ref)]
 
 use executor::{Handler, ModuleRef, System};
-use std::{time::SystemTime, collections::HashSet};
+use std::{collections::HashSet, time::SystemTime};
 use uuid::Uuid;
 
 mod domain;
@@ -10,21 +10,15 @@ pub use domain::*;
 pub(crate) mod storage;
 use storage::{Log, Persistent, Storage};
 
-mod follower;
-pub(crate) use follower::Follower;
-
-mod candidate;
-pub(crate) use candidate::Candidate;
-
-mod leader;
-pub(crate) use leader::Leader;
+mod state;
+pub(crate) use state::{Candidate, Follower, Leader, RaftState, ServerState};
 
 pub(crate) mod util;
 
 pub(crate) mod time;
 pub(crate) use time::{Timeout, Timer};
 
-struct Node {
+struct Server {
     config: ServerConfig,
     self_ref: Option<ModuleRef<Raft>>,
     storage: Storage,
@@ -39,16 +33,29 @@ struct Node {
     log: Persistent<Log>,
 }
 
-impl Node {
+impl Server {
     pub(crate) fn self_ref(&self) -> ModuleRef<Raft> {
         // Unwrapping is safe because this field has been set during Raft initialization.
         self.self_ref.as_ref().unwrap().clone()
     }
+
+    pub(crate) async fn send(&self, target: &Uuid, msg: RaftMessage) {
+        assert_ne!(*target, self.config.self_id);
+        self.sender.send(target, msg).await
+    }
+
+    pub(crate) async fn broadcast(&self, msg: RaftMessage) {
+        for server_id in &self.servers {
+            if *server_id != self.config.self_id {
+                self.send(server_id, msg.clone()).await;
+            }
+        }
+    }
 }
 
 pub struct Raft {
-    node: Node,
-    state: NodeState,
+    server: Server,
+    state: ServerState,
 }
 
 impl Raft {
@@ -80,7 +87,7 @@ impl Raft {
             guard.save().await;
         }
 
-        let node = Node {
+        let server = Server {
             self_ref: None,
             storage,
             state_machine,
@@ -93,8 +100,8 @@ impl Raft {
             config,
         };
         let raft = Raft {
-            node,
-            state: NodeState::initial(),
+            server,
+            state: ServerState::initial(),
         };
         let mref = system.register_module(raft).await;
         mref.send(Start).await;
@@ -102,30 +109,18 @@ impl Raft {
     }
 
     async fn handle_raft_msg(&mut self, msg: RaftMessage) {
-        let transition = match &mut self.state {
-            NodeState::Follower(inner) => inner.handle_raft_msg(&mut self.node, msg).await,
-            NodeState::Candidate(inner) => inner.handle_raft_msg(&mut self.node, msg).await,
-            NodeState::Leader(inner) => inner.handle_raft_msg(&mut self.node, msg).await,
-        };
+        let transition = self.state.handle_raft_msg(&mut self.server, msg).await;
         if let Some(next_state) = transition {
             self.state = next_state;
         }
     }
 
     async fn handle_client_req(&mut self, req: ClientRequest) {
-        match &mut self.state {
-            NodeState::Follower(inner) => inner.handle_client_req(&mut self.node, req).await,
-            NodeState::Candidate(inner) => inner.handle_client_req(&mut self.node, req).await,
-            NodeState::Leader(inner) => inner.handle_client_req(&mut self.node, req).await,
-        };
+        self.state.handle_client_req(&mut self.server, req).await;
     }
 
     async fn handle_timeout(&mut self, msg: Timeout) {
-        let transition = match &mut self.state {
-            NodeState::Follower(inner) => inner.handle_timeout(&mut self.node, msg).await,
-            NodeState::Candidate(inner) => inner.handle_timeout(&mut self.node, msg).await,
-            NodeState::Leader(inner) => inner.handle_timeout(&mut self.node, msg).await,
-        };
+        let transition = self.state.handle_timeout(&mut self.server, msg).await;
         if let Some(next_state) = transition {
             self.state = next_state;
         }
@@ -139,11 +134,8 @@ struct Start;
 #[async_trait::async_trait]
 impl Handler<Start> for Raft {
     async fn handle(&mut self, self_ref: &ModuleRef<Self>, _msg: Start) {
-        self.node.self_ref = Some(self_ref.clone());
-        match &mut self.state {
-            NodeState::Follower(inner) => inner.reset_timer(&self.node),
-            _ => unreachable!(),
-        }
+        self.server.self_ref = Some(self_ref.clone());
+        self.state.follower_mut().unwrap().reset_timer(&self.server);
     }
 }
 
@@ -167,45 +159,3 @@ impl Handler<Timeout> for Raft {
         self.handle_timeout(msg).await;
     }
 }
-
-enum NodeState {
-    Follower(Follower),
-    Candidate(Candidate),
-    Leader(Leader),
-}
-
-impl NodeState {
-    fn initial() -> NodeState {
-        Follower::initial().into()
-    }
-}
-
-macro_rules! node_state_impl_conversion {
-    ($state:ident, $getfn:ident, $getfn_mut:ident) => {
-        impl From<$state> for NodeState {
-            fn from(value: $state) -> NodeState {
-                NodeState::$state(value)
-            }
-        }
-
-        impl NodeState {
-            pub(crate) fn $getfn(&self) -> Option<&$state> {
-                match self {
-                    NodeState::$state(inner) => Some(inner),
-                    _ => None,
-                }
-            }
-
-            pub(crate) fn $getfn_mut(&mut self) -> Option<&mut $state> {
-                match self {
-                    NodeState::$state(inner) => Some(inner),
-                    _ => None,
-                }
-            }
-        }
-    };
-}
-
-node_state_impl_conversion!(Follower, follower, follower_mut);
-node_state_impl_conversion!(Candidate, candidate, candidate_mut);
-node_state_impl_conversion!(Leader, leader, leader_mut);

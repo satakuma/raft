@@ -2,12 +2,14 @@ use std::collections::HashSet;
 
 use uuid::Uuid;
 
-use crate::leader::Leader;
 use crate::time::{Timeout, Timer};
 use crate::util::{
     not_leader_add_server, not_leader_command, not_leader_register_client, not_leader_remove_server,
 };
-use crate::{ClientRequest, ClientRequestContent, Node, NodeState, RaftMessage, RequestVoteResponseArgs, RaftMessageContent};
+use crate::{
+    ClientRequest, ClientRequestContent, Follower, Leader, RaftMessage, RaftMessageContent,
+    RaftState, RequestVoteResponseArgs, Server, ServerState,
+};
 
 pub(crate) struct Candidate {
     ballot_box: BallotBox,
@@ -15,18 +17,45 @@ pub(crate) struct Candidate {
 }
 
 impl Candidate {
-    pub(crate) async fn handle_raft_msg(
+    async fn new(server: &mut Server) -> ServerState {
+        server.current_term.set(*server.current_term + 1).await;
+        // TODO: fix number of servers
+        let mut candidate = Candidate {
+            ballot_box: BallotBox::new(server.servers.len()),
+            election_timer: Timer::new_election_timer(server),
+        };
+
+        server.voted_for.set(Some(server.config.self_id)).await;
+        if candidate.ballot_box.add_vote(Vote::self_vote(server)) == VotingResult::Won {
+            Leader::transition_from_canditate(server).await.into()
+        } else {
+            candidate.into()
+        }
+    }
+
+    pub(crate) async fn transition_from_follower(server: &mut Server) -> ServerState {
+        Candidate::new(server).await
+    }
+
+    pub(crate) async fn loop_from_candidate(server: &mut Server) -> ServerState {
+        Candidate::new(server).await
+    }
+}
+
+#[async_trait::async_trait]
+impl RaftState for Candidate {
+    async fn handle_raft_msg(
         &mut self,
-        node: &mut Node,
+        server: &mut Server,
         msg: RaftMessage,
-    ) -> Option<NodeState> {
+    ) -> Option<ServerState> {
         match &msg.content {
             RaftMessageContent::AppendEntries(args) => todo!(), // turn to leader
-            RaftMessageContent::RequestVote(args) => todo!(), // respond with no
+            RaftMessageContent::RequestVote(args) => todo!(),   // respond with no
             RaftMessageContent::RequestVoteResponse(args) => {
                 let vote = Vote::from_msg(msg.header.source, args.vote_granted);
                 if self.ballot_box.add_vote(vote) == VotingResult::Won {
-                    Some(Leader::transition_from_canditate(node).await.into())
+                    Some(Leader::transition_from_canditate(server).await.into())
                 } else {
                     None
                 }
@@ -35,7 +64,7 @@ impl Candidate {
         }
     }
 
-    pub(crate) async fn handle_client_req(&mut self, node: &mut Node, req: ClientRequest) {
+    async fn handle_client_req(&mut self, server: &mut Server, req: ClientRequest) {
         match req.content {
             ClientRequestContent::Command { .. } => {
                 let _ = req.reply_to.send(not_leader_command(None)).await;
@@ -53,41 +82,11 @@ impl Candidate {
         }
     }
 
-    pub(crate) async fn handle_timeout(
-        &mut self,
-        node: &mut Node,
-        msg: Timeout,
-    ) -> Option<NodeState> {
+    async fn handle_timeout(&mut self, server: &mut Server, msg: Timeout) -> Option<ServerState> {
         match msg {
-            Timeout::Election => {
-                Some(Candidate::loop_from_candidate(node).await)
-            }
+            Timeout::Election => Some(Candidate::loop_from_candidate(server).await),
             _ => None,
         }
-    }
-
-    async fn new(node: &mut Node) -> NodeState {
-        node.current_term.set(*node.current_term + 1).await;
-        // TODO: fix number of servers
-        let mut candidate = Candidate {
-            ballot_box: BallotBox::new(node.servers.len()),
-            election_timer: Timer::new_election_timer(node)
-        };
-
-        node.voted_for.set(Some(node.config.self_id)).await;
-        if candidate.ballot_box.add_vote(Vote::self_vote(node)) == VotingResult::Won {
-            Leader::transition_from_canditate(node).await.into()
-        } else {
-            candidate.into()
-        }
-    }
-
-    pub(crate) async fn transition_from_follower(node: &mut Node) -> NodeState {
-        Candidate::new(node).await
-    }
-
-    pub(crate) async fn loop_from_candidate(node: &mut Node) -> NodeState {
-        Candidate::new(node).await
     }
 }
 
@@ -127,9 +126,9 @@ struct Vote {
 }
 
 impl Vote {
-    fn self_vote(node: &Node) -> Vote {
+    fn self_vote(server: &Server) -> Vote {
         Vote {
-            from: node.config.self_id,
+            from: server.config.self_id,
             granted: true,
         }
     }
