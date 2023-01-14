@@ -97,7 +97,7 @@ impl RaftState for ServerState {
     }
 }
 
-macro_rules! server_state_impl_conversion {
+macro_rules! impl_server_state_conversion {
     ($state:ident, $getfn:ident, $getfn_mut:ident) => {
         impl From<$state> for ServerState {
             fn from(value: $state) -> ServerState {
@@ -105,6 +105,7 @@ macro_rules! server_state_impl_conversion {
             }
         }
 
+        #[allow(dead_code)]
         impl ServerState {
             pub(crate) fn $getfn(&self) -> Option<&$state> {
                 match self {
@@ -123,6 +124,6 @@ macro_rules! server_state_impl_conversion {
     };
 }
 
-server_state_impl_conversion!(Follower, follower, follower_mut);
-server_state_impl_conversion!(Candidate, candidate, candidate_mut);
-server_state_impl_conversion!(Leader, leader, leader_mut);
+impl_server_state_conversion!(Follower, follower, follower_mut);
+impl_server_state_conversion!(Candidate, candidate, candidate_mut);
+impl_server_state_conversion!(Leader, leader, leader_mut);

@@ -267,3 +267,33 @@ pub struct InstallSnapshotResponseArgs {
     /// `offset` from the corresponding `InstallSnapshot` message.
     pub offset: usize,
 }
+
+#[rustfmt::skip]
+mod conv_impls {
+    use super::*;
+
+    macro_rules! impl_args_conversion {
+        ($tp:ty, $var:ident, $args:ty) => {
+            impl From<$args> for $tp {
+                fn from(value: $args) -> $tp {
+                    <$tp>::$var(value)
+                }
+            }
+        };
+    }
+    
+    // Conversion for RaftMessageContent from inner structs
+    impl_args_conversion!(RaftMessageContent, AppendEntries, AppendEntriesArgs);
+    impl_args_conversion!(RaftMessageContent, AppendEntriesResponse, AppendEntriesResponseArgs);
+    impl_args_conversion!(RaftMessageContent, RequestVote, RequestVoteArgs);
+    impl_args_conversion!(RaftMessageContent, RequestVoteResponse, RequestVoteResponseArgs);
+    impl_args_conversion!(RaftMessageContent, InstallSnapshot, InstallSnapshotArgs);
+    impl_args_conversion!(RaftMessageContent, InstallSnapshotResponse, InstallSnapshotResponseArgs);
+
+    // Conversion for ClientRequestResponse from inner structs
+    impl_args_conversion!(ClientRequestResponse, CommandResponse, CommandResponseArgs);
+    impl_args_conversion!(ClientRequestResponse, SnapshotResponse, SnapshotResponseArgs);
+    impl_args_conversion!(ClientRequestResponse, AddServerResponse, AddServerResponseArgs);
+    impl_args_conversion!(ClientRequestResponse, RemoveServerResponse, RemoveServerResponseArgs);
+    impl_args_conversion!(ClientRequestResponse, RegisterClientResponse, RegisterClientResponseArgs);
+}

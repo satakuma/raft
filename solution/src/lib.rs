@@ -1,7 +1,5 @@
-#![allow(clippy::await_holding_refcell_ref)]
-
 use executor::{Handler, ModuleRef, System};
-use std::{collections::HashSet, time::SystemTime};
+use std::{cmp::min, collections::HashSet, time::SystemTime};
 use uuid::Uuid;
 
 mod domain;
@@ -25,10 +23,12 @@ struct Server {
     state_machine: Box<dyn StateMachine>,
     sender: Box<dyn RaftSender>,
 
-    servers: HashSet<Uuid>,
+    all_servers: HashSet<Uuid>,
 
     pstate: Persistent<PersistentState>,
     log: Persistent<Log>,
+    commit_index: usize,
+    last_applied: usize,
 }
 
 impl Server {
@@ -37,17 +37,84 @@ impl Server {
         self.self_ref.as_ref().unwrap().clone()
     }
 
-    pub(crate) async fn send(&self, target: &Uuid, msg: RaftMessage) {
-        assert_ne!(*target, self.config.self_id);
-        self.sender.send(target, msg).await
+    pub(crate) fn can_vote_for(&self, candidate_id: Uuid) -> bool {
+        self.pstate.voted_for.is_none() || self.pstate.voted_for == Some(candidate_id)
     }
 
-    pub(crate) async fn broadcast(&self, msg: RaftMessage) {
-        for server_id in &self.servers {
+    pub(crate) async fn update_commit_index(&mut self, leader_commit_index: usize) {
+        let new_commit_index = min(self.log.last_index(), leader_commit_index);
+        if self.commit_index < new_commit_index {
+            self.commit_index = new_commit_index;
+            // TODO: apply to the state machine
+        }
+    }
+
+    pub(crate) async fn send(&self, target: Uuid, msg_content: RaftMessageContent) {
+        assert_ne!(target, self.config.self_id);
+        let msg = RaftMessage {
+            header: RaftMessageHeader {
+                source: self.config.self_id,
+                term: self.pstate.current_term,
+            },
+            content: msg_content,
+        };
+        self.sender.send(&target, msg).await
+    }
+
+    pub(crate) async fn broadcast(&self, msg_content: RaftMessageContent) {
+        for server_id in &self.all_servers {
             if *server_id != self.config.self_id {
-                self.send(server_id, msg.clone()).await;
+                self.send(*server_id, msg_content.clone()).await;
             }
         }
+    }
+
+    pub(crate) async fn respond_with(&self, msg_hdr: &RaftMessageHeader, res: RaftMessageContent) {
+        self.send(msg_hdr.source, res.into()).await;
+    }
+
+    pub(crate) async fn respond_false(&self, msg: &RaftMessage) {
+        let response_content: RaftMessageContent = match &msg.content {
+            RaftMessageContent::AppendEntries(_) => AppendEntriesResponseArgs {
+                success: false,
+                last_verified_log_index: self.log.last_index(),
+            }
+            .into(),
+            RaftMessageContent::RequestVote(_) => RequestVoteResponseArgs {
+                vote_granted: false,
+            }
+            .into(),
+            RaftMessageContent::InstallSnapshot(_) => todo!(),
+            _ => unreachable!(),
+        };
+        self.respond_with(&msg.header, response_content).await;
+    }
+
+    pub(crate) async fn respond_not_leader(&self, req: ClientRequest, leader_hint: Option<Uuid>) {
+        let response = match req.content {
+            ClientRequestContent::Command { .. } => CommandResponseArgs {
+                client_id: todo!(),
+                sequence_num: todo!(),
+                content: CommandResponseContent::NotLeader { leader_hint },
+            }
+            .into(),
+            ClientRequestContent::AddServer { .. } => AddServerResponseArgs {
+                new_server: todo!(),
+                content: AddServerResponseContent::NotLeader { leader_hint },
+            }
+            .into(),
+            ClientRequestContent::RemoveServer { .. } => RemoveServerResponseArgs {
+                old_server: todo!(),
+                content: RemoveServerResponseContent::NotLeader { leader_hint },
+            }
+            .into(),
+            ClientRequestContent::RegisterClient => RegisterClientResponseArgs {
+                content: RegisterClientResponseContent::NotLeader { leader_hint },
+            }
+            .into(),
+            ClientRequestContent::Snapshot => return,
+        };
+        let _ = req.reply_to.send(response).await;
     }
 }
 
@@ -97,10 +164,12 @@ impl Raft {
             storage,
             state_machine,
             sender: message_sender,
-            servers: config.servers.clone(),
+            all_servers: config.servers.clone(),
             pstate,
             log,
             config,
+            commit_index: 0,
+            last_applied: 0,
         };
         let raft = Raft {
             server,

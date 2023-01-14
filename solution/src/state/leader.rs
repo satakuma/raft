@@ -1,10 +1,9 @@
-use std::collections::HashMap;
-
+use std::{cmp::min, collections::HashMap};
 use uuid::Uuid;
 
 use crate::{
-    ClientRequest, ClientRequestContent, RaftMessage, RaftState, Server, ServerState, Timeout,
-    Timer,
+    AppendEntriesArgs, ClientRequest, ClientRequestContent, RaftMessage, RaftState, Server,
+    ServerState, Timeout, Timer,
 };
 
 pub(crate) struct Leader {
@@ -14,7 +13,36 @@ pub(crate) struct Leader {
 }
 
 impl Leader {
-    async fn heartbeat(&self) {}
+    async fn replicate_log_with_follower(&self, server: &Server, follower: Uuid) {
+        let prev_log_index = self.next_index[&follower] - 1;
+
+        let num_entries = min(
+            server.log.last_index() - prev_log_index,
+            server.config.append_entries_batch_size,
+        );
+        let msg = AppendEntriesArgs {
+            prev_log_index,
+            prev_log_term: server.pstate.current_term,
+            entries: server.log[prev_log_index..prev_log_index + num_entries].to_vec(),
+            leader_commit: server.commit_index,
+        };
+        server.send(follower, msg.into()).await;
+    }
+
+    async fn replicate_log(&self, server: &mut Server) {
+        for server_id in &server.all_servers {
+            if *server_id != server.config.self_id {
+                self.replicate_log_with_follower(server, *server_id).await;
+            }
+        }
+    }
+
+    async fn heartbeat(&self, server: &mut Server) {
+        // We use AppendEntries messages for heartbeat.
+        // It is a countermeasure to deal with lost packets / slow followers etc.
+        // which ensures that eventually all followers will store all log entries.
+        self.replicate_log(server).await;
+    }
 
     pub(crate) async fn transition_from_canditate(server: &mut Server) -> ServerState {
         server
@@ -26,12 +54,12 @@ impl Leader {
             .await;
 
         let next_index = server
-            .servers
+            .all_servers
             .iter()
             .cloned()
-            .map(|s| (s, server.log.len()))
+            .map(|s| (s, server.log.last_index() + 1))
             .collect();
-        let match_index = server.servers.iter().cloned().map(|s| (s, 0)).collect();
+        let match_index = server.all_servers.iter().cloned().map(|s| (s, 0)).collect();
 
         Leader {
             next_index,
@@ -65,7 +93,7 @@ impl RaftState for Leader {
     async fn handle_timeout(&mut self, server: &mut Server, msg: Timeout) -> Option<ServerState> {
         match msg {
             Timeout::Heartbeat => {
-                self.heartbeat().await;
+                self.heartbeat(server).await;
                 None
             }
             _ => None,

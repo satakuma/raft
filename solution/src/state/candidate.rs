@@ -1,14 +1,9 @@
 use std::collections::HashSet;
-
 use uuid::Uuid;
 
-use crate::time::{Timeout, Timer};
-use crate::util::{
-    not_leader_add_server, not_leader_command, not_leader_register_client, not_leader_remove_server,
-};
 use crate::{
     ClientRequest, ClientRequestContent, Follower, Leader, RaftMessage, RaftMessageContent,
-    RaftState, RequestVoteResponseArgs, Server, ServerState,
+    RaftState, RequestVoteResponseArgs, Server, ServerState, Timeout, Timer,
 };
 
 pub(crate) struct Candidate {
@@ -28,7 +23,7 @@ impl Candidate {
 
         // TODO: fix number of servers
         let mut candidate = Candidate {
-            ballot_box: BallotBox::new(server.servers.len()),
+            ballot_box: BallotBox::new(server.all_servers.len()),
             election_timer: Timer::new_election_timer(server),
         };
 
@@ -55,10 +50,26 @@ impl RaftState for Candidate {
         server: &mut Server,
         msg: RaftMessage,
     ) -> Option<ServerState> {
-        match &msg.content {
-            RaftMessageContent::AppendEntries(args) => todo!(), // turn to leader
-            RaftMessageContent::RequestVote(args) => todo!(),   // respond with no
+        if msg.header.term < server.pstate.current_term {
+            server.respond_false(&msg).await;
+            return None;
+        }
+        match msg.content {
+            RaftMessageContent::AppendEntries(_) => {
+                // If we receive an AppendEntries message with current term, we convert
+                // to a follower and handle the message as a follower.
+                let mut follower = Follower::follow_leader(server, msg.header.source);
+                let followers_transition = follower.handle_raft_msg(server, msg).await;
+                assert!(followers_transition.is_none());
+                Some(follower)
+            }
+            RaftMessageContent::RequestVote(_) => {
+                // Respond false because we already voted for ourself.
+                server.respond_false(&msg).await;
+                None
+            }
             RaftMessageContent::RequestVoteResponse(args) => {
+                // Receive the vote and possibly convert to a leader.
                 let vote = Vote::from_msg(msg.header.source, args.vote_granted);
                 if self.ballot_box.add_vote(vote) == VotingResult::Won {
                     Some(Leader::transition_from_canditate(server).await.into())
@@ -66,25 +77,18 @@ impl RaftState for Candidate {
                     None
                 }
             }
+            RaftMessageContent::InstallSnapshot(_args) => unimplemented!("Snapshots omitted"),
+            RaftMessageContent::InstallSnapshotResponse(_args) => {
+                unimplemented!("Snapshots omitted")
+            }
             _ => None,
         }
     }
 
     async fn handle_client_req(&mut self, server: &mut Server, req: ClientRequest) {
         match req.content {
-            ClientRequestContent::Command { .. } => {
-                let _ = req.reply_to.send(not_leader_command(None)).await;
-            }
             ClientRequestContent::Snapshot => todo!(),
-            ClientRequestContent::AddServer { .. } => {
-                let _ = req.reply_to.send(not_leader_add_server(None)).await;
-            }
-            ClientRequestContent::RemoveServer { .. } => {
-                let _ = req.reply_to.send(not_leader_remove_server(None)).await;
-            }
-            ClientRequestContent::RegisterClient => {
-                let _ = req.reply_to.send(not_leader_register_client(None)).await;
-            }
+            _ => server.respond_not_leader(req, None).await,
         }
     }
 

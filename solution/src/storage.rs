@@ -13,6 +13,18 @@ use uuid::Uuid;
 
 use std::sync::Arc;
 
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
+pub(crate) struct LogEntryMetadata {
+    pub term: u64,
+    pub index: usize,
+}
+
+impl From<(u64, usize)> for LogEntryMetadata {
+    fn from((term, index): (u64, usize)) -> Self {
+        LogEntryMetadata { term, index }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Log {
     entries: Vec<LogEntry>,
@@ -25,8 +37,54 @@ impl Log {
         }
     }
 
-    pub(crate) fn last_log_index(&self) -> usize {
-        self.entries.len() - 1
+    pub(crate) fn get_metadata(&self, index: usize) -> Option<LogEntryMetadata> {
+        if index < self.len() {
+            LogEntryMetadata {
+                term: self.entries[index].term,
+                index,
+            }
+            .into()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn last_index(&self) -> usize {
+        self.len() - 1
+    }
+
+    pub(crate) fn last_metadata(&self) -> LogEntryMetadata {
+        (self.last().unwrap().term, self.last_index()).into()
+    }
+
+    pub(crate) fn is_up_to_date_with(&self, term_index: LogEntryMetadata) -> bool {
+        self.last_metadata() < term_index
+    }
+
+    pub(crate) async fn append_entries(
+        &mut self,
+        new_entries: Vec<LogEntry>,
+        prev_log_md: LogEntryMetadata,
+    ) -> bool {
+        if self.get_metadata(prev_log_md.index) != Some(prev_log_md) {
+            return false;
+        }
+
+        for (i, entry) in new_entries.into_iter().enumerate() {
+            match self.get_metadata(prev_log_md.index + i) {
+                Some(md) if md == prev_log_md => {
+                    // This entry is already in the log.
+                    continue;
+                }
+                _ => {
+                    // Log entries from this point either conflict or don't exist.
+                    // Truncate the log (possibly no-op) and add a new entry.
+                    self.truncate(prev_log_md.index + i);
+                    self.push(entry);
+                }
+            }
+        }
+        true
     }
 }
 
