@@ -1,17 +1,59 @@
 //! StableStorage implementation.
 
-use crate::StableStorage;
+use crate::{StableStorage, LogEntry};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use tokio::fs::{remove_file, rename, File, OpenOptions};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 
-type Storage = Rc<RefCell<Box<dyn StableStorage>>>;
+use std::sync::Arc;
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Log {
+    entries: Vec<LogEntry>,
+}
+
+impl Log {
+    pub(crate) fn empty() -> Log {
+        Log {
+            entries: Vec::new()
+        }
+    }
+}
+
+impl Deref for Log {
+    type Target = Vec<LogEntry>;
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl DerefMut for Log {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.entries
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct Storage(Arc<Mutex<Box<dyn StableStorage>>>);
+
+impl Storage {
+    pub(crate) fn new(inner: Box<dyn StableStorage>) -> Storage {
+        Storage(Arc::new(Mutex::new(inner)))
+    }
+
+    async fn put(&self, key: &str, value: &[u8]) {
+        self.0.lock().await.put(key, value).await.unwrap();
+    }
+
+    async fn get(&self, key: &str) -> Option<Vec<u8>> {
+        self.0.lock().await.get(key).await
+    }
+}
 
 pub(crate) struct Persistent<T> {
     value: T,
@@ -23,8 +65,8 @@ impl<T> Persistent<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
 {
-    pub async fn new(name: impl AsRef<str>, value: T, storage: &Storage) -> Persistent<T> {
-        match storage.borrow().get(name.as_ref()).await {
+    pub(crate) async fn new(name: impl AsRef<str>, value: T, storage: &Storage) -> Persistent<T> {
+        match storage.get(name.as_ref()).await {
             Some(raw) => {
                 let value = bincode::deserialize(&raw).unwrap();
                 Persistent {
@@ -35,10 +77,8 @@ where
             }
             None => {
                 storage
-                    .borrow_mut()
                     .put(name.as_ref(), &bincode::serialize(&value).unwrap())
-                    .await
-                    .unwrap();
+                    .await;
                 Persistent {
                     value,
                     name: name.as_ref().to_string(),
@@ -48,13 +88,18 @@ where
         }
     }
 
-    pub async fn set(&mut self, value: T) {
-        self.value = value;
+    async fn save(&self) {
         self.storage
-            .borrow_mut()
-            .put(&self.name, &bincode::serialize(&self.value).unwrap())
-            .await
-            .unwrap()
+            .put(&self.name, &bincode::serialize(&self.value).unwrap()).await;
+    }
+
+    pub(crate) async fn set(&mut self, value: T) {
+        self.value = value;
+        self.save().await;
+    }
+
+    pub(crate) fn mutate(&mut self) -> PersistentGuard<'_, T> {
+        PersistentGuard::new(self)
     }
 }
 
@@ -65,60 +110,44 @@ impl<T> Deref for Persistent<T> {
     }
 }
 
-pub(crate) struct PersistentVec<T> {
-    values: Vec<T>,
-    name: String,
-    storage: Storage,
+pub(crate) struct PersistentGuard<'a, T> {
+    pvalue: &'a mut Persistent<T>,
+    saved: bool,
 }
 
-impl<T> PersistentVec<T>
-where
-    T: Serialize + for<'de> Deserialize<'de>,
-{
-    fn item_name(&self, ind: usize) -> String {
-        format!("{}_{}", &self.name, ind)
-    }
-
-    pub async fn new(name: impl AsRef<str>, storage: &Storage) -> PersistentVec<T> {
-        let mut vec = PersistentVec {
-            values: Vec::new(),
-            name: name.as_ref().to_string(),
-            storage: storage.clone(),
-        };
-
-        while let Some(raw) = storage.borrow().get(&vec.item_name(vec.values.len())).await {
-            vec.values.push(bincode::deserialize(&raw).unwrap());
+impl<'a, T> PersistentGuard<'a, T>
+where T: Serialize + for<'de> Deserialize<'de> {
+    fn new(pvalue: &mut Persistent<T>) -> PersistentGuard<'_, T> {
+        PersistentGuard {
+            pvalue,
+            saved: false,
         }
-
-        vec
     }
 
-    async fn storage_set(&mut self, ind: usize) {
-        self.storage
-            .borrow_mut()
-            .put(
-                &self.item_name(ind),
-                &bincode::serialize(&self.values[ind]).unwrap(),
-            )
-            .await
-            .unwrap()
-    }
-
-    pub async fn set(&mut self, ind: usize, value: T) {
-        self.values[ind] = value;
-        self.storage_set(ind).await;
-    }
-
-    pub async fn push(&mut self, value: T) {
-        self.values.push(value);
-        self.storage_set(self.values.len() - 1).await;
+    pub(crate) async fn save(mut self) {
+        self.pvalue.save().await;
+        self.saved = true;
     }
 }
 
-impl<T> Deref for PersistentVec<T> {
-    type Target = Vec<T>;
+impl<'a, T> Drop for PersistentGuard<'a, T> {
+    fn drop(&mut self) {
+        if !self.saved {
+            panic!("unsaved changes at guard drop, fix your code");
+        }
+    }
+}
+
+impl<'a, T> Deref for PersistentGuard<'a, T> {
+    type Target = T;
     fn deref(&self) -> &Self::Target {
-        &self.values
+        &self.pvalue.value
+    }
+}
+
+impl<'a, T> DerefMut for PersistentGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.pvalue.value
     }
 }
 

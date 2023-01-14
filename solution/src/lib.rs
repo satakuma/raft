@@ -1,14 +1,14 @@
 #![allow(clippy::await_holding_refcell_ref)]
 
 use executor::{Handler, ModuleRef, System};
-use std::{cell::RefCell, rc::Rc, time::SystemTime};
+use std::{time::SystemTime, collections::HashSet};
 use uuid::Uuid;
 
 mod domain;
 pub use domain::*;
 
 pub(crate) mod storage;
-use storage::{Persistent, PersistentVec};
+use storage::{Log, Persistent, Storage};
 
 mod follower;
 pub(crate) use follower::Follower;
@@ -27,25 +27,24 @@ pub(crate) use time::{Timeout, Timer};
 struct Node {
     config: ServerConfig,
     self_ref: Option<ModuleRef<Raft>>,
+    storage: Storage,
     state_machine: Box<dyn StateMachine>,
     sender: Box<dyn RaftSender>,
 
+    servers: HashSet<Uuid>,
+
     current_term: Persistent<u64>,
-    voted_for: Persistent<Uuid>,
-    log: PersistentVec<LogEntry>,
+    voted_for: Persistent<Option<Uuid>>,
+    leader_id: Persistent<Option<Uuid>>,
+    log: Persistent<Log>,
 }
 
 impl Node {
     pub(crate) fn self_ref(&self) -> ModuleRef<Raft> {
-        // Unwrapping is safe because this field is set during Raft initialization.
+        // Unwrapping is safe because this field has been set during Raft initialization.
         self.self_ref.as_ref().unwrap().clone()
     }
 }
-
-// Safety: Send has to be manually implemented due to the `Rc` inside.
-// Fields using Rc are private and are never shared outside of the
-// Raft struct. Thus the data pointed by Rc is never shared between threads.
-unsafe impl Send for Node {}
 
 pub struct Raft {
     node: Node,
@@ -63,30 +62,35 @@ impl Raft {
         stable_storage: Box<dyn StableStorage>,
         message_sender: Box<dyn RaftSender>,
     ) -> ModuleRef<Self> {
-        let storage = Rc::new(RefCell::new(stable_storage));
+        let storage = Storage::new(stable_storage);
         let current_term = Persistent::new("current_term", 0, &storage).await;
-        let voted_for = Persistent::new("voted_for", Uuid::nil(), &storage).await;
+        let voted_for = Persistent::new("voted_for", None, &storage).await;
+        let leader_id = Persistent::new("leader_id", None, &storage).await;
 
-        let mut log = PersistentVec::new("log", &storage).await;
+        let mut log = Persistent::new("voted_for", Log::empty(), &storage).await;
         if log.is_empty() {
-            log.push(LogEntry {
+            let mut guard = log.mutate();
+            guard.push(LogEntry {
                 content: LogEntryContent::Configuration {
                     servers: config.servers.clone(),
                 },
                 term: 0,
                 timestamp: first_log_entry_timestamp,
-            })
-            .await;
+            });
+            guard.save().await;
         }
 
         let node = Node {
-            config,
             self_ref: None,
+            storage,
             state_machine,
             sender: message_sender,
+            servers: config.servers.clone(),
             current_term,
             voted_for,
+            leader_id,
             log,
+            config,
         };
         let raft = Raft {
             node,
