@@ -18,14 +18,20 @@ pub(crate) struct Candidate {
 
 impl Candidate {
     async fn new(server: &mut Server) -> ServerState {
-        server.current_term.set(*server.current_term + 1).await;
+        server
+            .pstate
+            .update_with(|ps| {
+                ps.current_term += 1;
+                ps.voted_for = Some(server.config.self_id);
+            })
+            .await;
+
         // TODO: fix number of servers
         let mut candidate = Candidate {
             ballot_box: BallotBox::new(server.servers.len()),
             election_timer: Timer::new_election_timer(server),
         };
 
-        server.voted_for.set(Some(server.config.self_id)).await;
         if candidate.ballot_box.add_vote(Vote::self_vote(server)) == VotingResult::Won {
             Leader::transition_from_canditate(server).await.into()
         } else {

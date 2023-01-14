@@ -17,8 +17,13 @@ impl Leader {
     async fn heartbeat(&self) {}
 
     pub(crate) async fn transition_from_canditate(server: &mut Server) -> ServerState {
-        server.voted_for.set(Some(server.config.self_id)).await;
-        server.leader_id.set(Some(server.config.self_id)).await;
+        server
+            .pstate
+            .update_with(|ps| {
+                ps.voted_for = Some(server.config.self_id);
+                ps.leader_id = Some(server.config.self_id);
+            })
+            .await;
 
         let next_index = server
             .servers

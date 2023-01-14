@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use tokio::fs::{remove_file, rename, File, OpenOptions};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use std::sync::Arc;
 
@@ -40,6 +41,13 @@ impl DerefMut for Log {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.entries
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub(crate) struct PersistentState {
+    pub current_term: u64,
+    pub voted_for: Option<Uuid>,
+    pub leader_id: Option<Uuid>,
 }
 
 #[derive(Clone)]
@@ -98,8 +106,16 @@ where
             .await;
     }
 
-    pub(crate) async fn set(&mut self, value: T) {
+    pub(crate) async fn update(&mut self, value: T) {
         self.value = value;
+        self.save().await;
+    }
+
+    pub(crate) async fn update_with<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut T),
+    {
+        f(&mut self.value);
         self.save().await;
     }
 

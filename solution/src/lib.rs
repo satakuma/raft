@@ -8,7 +8,7 @@ mod domain;
 pub use domain::*;
 
 pub(crate) mod storage;
-use storage::{Log, Persistent, Storage};
+use storage::{Log, Persistent, PersistentState, Storage};
 
 mod state;
 pub(crate) use state::{Candidate, Follower, Leader, RaftState, ServerState};
@@ -27,9 +27,7 @@ struct Server {
 
     servers: HashSet<Uuid>,
 
-    current_term: Persistent<u64>,
-    voted_for: Persistent<Option<Uuid>>,
-    leader_id: Persistent<Option<Uuid>>,
+    pstate: Persistent<PersistentState>,
     log: Persistent<Log>,
 }
 
@@ -70,9 +68,16 @@ impl Raft {
         message_sender: Box<dyn RaftSender>,
     ) -> ModuleRef<Self> {
         let storage = Storage::new(stable_storage);
-        let current_term = Persistent::new("current_term", 0, &storage).await;
-        let voted_for = Persistent::new("voted_for", None, &storage).await;
-        let leader_id = Persistent::new("leader_id", None, &storage).await;
+        let pstate = Persistent::new(
+            "raft_persistent_state",
+            PersistentState {
+                current_term: 0,
+                voted_for: None,
+                leader_id: None,
+            },
+            &storage,
+        )
+        .await;
 
         let mut log = Persistent::new("voted_for", Log::empty(), &storage).await;
         if log.is_empty() {
@@ -93,9 +98,7 @@ impl Raft {
             state_machine,
             sender: message_sender,
             servers: config.servers.clone(),
-            current_term,
-            voted_for,
-            leader_id,
+            pstate,
             log,
             config,
         };

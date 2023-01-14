@@ -27,9 +27,14 @@ impl Follower {
         term: u64,
         leader: Uuid,
     ) -> ServerState {
-        server.current_term.set(term).await;
-        server.voted_for.set(None).await; // TODO: think if this should be atomic
-        server.leader_id.set(None).await;
+        server
+            .pstate
+            .update_with(|ps| {
+                ps.current_term = term;
+                ps.voted_for = None;
+                ps.leader_id = None;
+            })
+            .await;
 
         Follower {
             leader: leader.into(),
@@ -60,8 +65,10 @@ impl RaftState for Follower {
                 None
             }
             RaftMessageContent::RequestVote(args) => {
-                assert!(*server.current_term == msg.header.term);
-                if server.voted_for.is_none() || *server.voted_for == Some(msg.header.source) {
+                assert!(server.pstate.current_term == msg.header.term);
+                if server.pstate.voted_for.is_none()
+                    || server.pstate.voted_for == Some(msg.header.source)
+                {
                     // check log and reply
                 }
                 None

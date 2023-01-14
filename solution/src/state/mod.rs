@@ -23,7 +23,7 @@ pub(crate) trait RaftState {
         server: &mut Server,
         msg: &RaftMessage,
     ) -> Option<ServerState> {
-        if msg.header.term > *server.current_term {
+        if msg.header.term > server.pstate.current_term {
             Some(Follower::follow_new_term_leader(server, msg.header.term, msg.header.source).await)
         } else {
             None
