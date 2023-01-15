@@ -26,7 +26,6 @@ struct Server {
     all_servers: HashSet<Uuid>,
 
     pstate: Persistent<PersistentState>,
-    log: Persistent<Log>,
     commit_index: usize,
     last_applied: usize,
 }
@@ -37,15 +36,19 @@ impl Server {
         self.self_ref.as_ref().unwrap().clone()
     }
 
+    pub(crate) fn log(&self) -> &Log {
+        &self.pstate.log
+    }
+
     pub(crate) fn can_vote_for(&self, candidate_id: Uuid) -> bool {
         self.pstate.voted_for.is_none() || self.pstate.voted_for == Some(candidate_id)
     }
 
-    pub(crate) async fn update_commit_index(&mut self, leader_commit_index: usize) {
-        let new_commit_index = min(self.log.last_index(), leader_commit_index);
-        if self.commit_index < new_commit_index {
-            self.commit_index = new_commit_index;
+    pub(crate) async fn update_commit_index(&mut self, new_commit_index: usize) {
+        let new_commit_index = min(self.log().last_index(), new_commit_index);
+        while self.commit_index < new_commit_index {
             // TODO: apply to the state machine
+            self.commit_index += 1;
         }
     }
 
@@ -77,7 +80,7 @@ impl Server {
         let response_content: RaftMessageContent = match &msg.content {
             RaftMessageContent::AppendEntries(_) => AppendEntriesResponseArgs {
                 success: false,
-                last_verified_log_index: self.log.last_index(),
+                last_verified_log_index: self.log().last_index(),
             }
             .into(),
             RaftMessageContent::RequestVote(_) => RequestVoteResponseArgs {
@@ -135,21 +138,21 @@ impl Raft {
         message_sender: Box<dyn RaftSender>,
     ) -> ModuleRef<Self> {
         let storage = Storage::new(stable_storage);
-        let pstate = Persistent::new(
+        let mut pstate = Persistent::new(
             "raft_persistent_state",
             PersistentState {
                 current_term: 0,
                 voted_for: None,
                 leader_id: None,
+                log: Log::empty(),
             },
             &storage,
         )
         .await;
 
-        let mut log = Persistent::new("voted_for", Log::empty(), &storage).await;
-        if log.is_empty() {
-            let mut guard = log.mutate();
-            guard.push(LogEntry {
+        if pstate.log.is_empty() {
+            let mut guard = pstate.mutate();
+            guard.log.push(LogEntry {
                 content: LogEntryContent::Configuration {
                     servers: config.servers.clone(),
                 },
@@ -166,7 +169,6 @@ impl Raft {
             sender: message_sender,
             all_servers: config.servers.clone(),
             pstate,
-            log,
             config,
             commit_index: 0,
             last_applied: 0,
@@ -207,7 +209,7 @@ struct Start;
 impl Handler<Start> for Raft {
     async fn handle(&mut self, self_ref: &ModuleRef<Self>, _msg: Start) {
         self.server.self_ref = Some(self_ref.clone());
-        self.state.follower_mut().unwrap().reset_timer(&self.server);
+        self.state = Follower::new(&self.server).into();
     }
 }
 

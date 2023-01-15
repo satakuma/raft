@@ -18,7 +18,14 @@ impl Follower {
         }
     }
 
-    pub(crate) fn follow_leader(server: &mut Server, leader: Uuid) -> ServerState {
+    pub(crate) fn new(server: &Server) -> Follower {
+        Follower {
+            leader: None,
+            election_timer: Timer::new_election_timer(server).into(),
+        }
+    }
+
+    pub(crate) fn follow_leader(server: &Server, leader: Uuid) -> ServerState {
         Follower {
             leader: leader.into(),
             election_timer: Timer::new_election_timer(server).into(),
@@ -68,8 +75,9 @@ impl RaftState for Follower {
                 self.reset_timer(server);
 
                 // Append entries to the log, save it.
-                let mut guard = server.log.mutate();
+                let mut guard = server.pstate.mutate();
                 let success = guard
+                    .log
                     .append_entries(
                         args.entries,
                         (args.prev_log_term, args.prev_log_index).into(),
@@ -83,7 +91,7 @@ impl RaftState for Follower {
                 // Send response to the leader.
                 let response = AppendEntriesResponseArgs {
                     success,
-                    last_verified_log_index: server.log.last_index(),
+                    last_verified_log_index: server.log().last_index(),
                 };
                 server.respond_with(&msg.header, response.into()).await;
             }
@@ -92,7 +100,7 @@ impl RaftState for Follower {
                 // and the candidate's log is up to date with our log.
                 let vote_granted = if server.can_vote_for(msg.header.source)
                     && server
-                        .log
+                        .log()
                         .is_up_to_date_with((args.last_log_term, args.last_log_index).into())
                 {
                     // If so, take our voting ticket and vote for the candidate.

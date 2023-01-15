@@ -101,11 +101,12 @@ impl DerefMut for Log {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize)]
 pub(crate) struct PersistentState {
     pub current_term: u64,
     pub voted_for: Option<Uuid>,
     pub leader_id: Option<Uuid>,
+    pub log: Log,
 }
 
 #[derive(Clone)]

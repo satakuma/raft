@@ -42,9 +42,14 @@ impl Timer {
         )
     }
 
+    pub(crate) fn new_heartbeat_response_timer(server: &Server) -> Timer {
+        let dur = rand::thread_rng().gen_range(server.config.election_timeout_range.clone());
+        Timer::new(server.self_ref(), dur, Timeout::HeartbeatResponse)
+    }
+
     pub(crate) fn reset(&mut self) {
         let (tx, mut rx) = oneshot::channel();
-        self.handle = Some(tx);
+        self.handle = Some(tx); // old handle gets dropped here
 
         let inner = self.inner.clone();
         tokio::spawn(async move {
@@ -57,10 +62,15 @@ impl Timer {
             }
         });
     }
+
+    pub(crate) fn stop(&mut self) {
+        self.handle = None;
+    }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum Timeout {
     Election,
     Heartbeat,
+    HeartbeatResponse,
 }

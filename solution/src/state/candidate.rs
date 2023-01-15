@@ -21,7 +21,6 @@ impl Candidate {
             })
             .await;
 
-        // TODO: fix number of servers
         let mut candidate = Candidate {
             ballot_box: BallotBox::new(server.all_servers.len()),
             election_timer: Timer::new_election_timer(server),

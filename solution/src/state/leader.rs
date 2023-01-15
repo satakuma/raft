@@ -1,15 +1,22 @@
-use std::{cmp::min, collections::HashMap};
+use std::{
+    cmp::min,
+    collections::{HashMap, HashSet},
+    time::SystemTime,
+};
 use uuid::Uuid;
 
 use crate::{
-    AppendEntriesArgs, ClientRequest, ClientRequestContent, RaftMessage, RaftState, Server,
-    ServerState, Timeout, Timer,
+    AppendEntriesArgs, ClientRequest, ClientRequestContent, Follower, LogEntry, LogEntryContent,
+    RaftMessage, RaftMessageContent, RaftState, Server, ServerState, Timeout, Timer,
 };
 
 pub(crate) struct Leader {
     next_index: HashMap<Uuid, usize>,
     match_index: HashMap<Uuid, usize>,
     heartbeat_timer: Timer,
+
+    heartbeat_responders: HashSet<Uuid>,
+    heartbeat_response_timer: Timer,
 }
 
 impl Leader {
@@ -17,13 +24,13 @@ impl Leader {
         let prev_log_index = self.next_index[&follower] - 1;
 
         let num_entries = min(
-            server.log.last_index() - prev_log_index,
+            server.log().last_index() - prev_log_index,
             server.config.append_entries_batch_size,
         );
         let msg = AppendEntriesArgs {
             prev_log_index,
             prev_log_term: server.pstate.current_term,
-            entries: server.log[prev_log_index..prev_log_index + num_entries].to_vec(),
+            entries: server.log()[prev_log_index + 1..prev_log_index + 1 + num_entries].to_vec(),
             leader_commit: server.commit_index,
         };
         server.send(follower, msg.into()).await;
@@ -37,6 +44,13 @@ impl Leader {
         }
     }
 
+    async fn advance_commit_index(&mut self, server: &mut Server) {
+        let n = server.all_servers.len() / 2; // we don't count ourself here
+        let mut indexes = self.match_index.values().collect::<Vec<_>>();
+        let (_, highest_matching, _) = indexes.select_nth_unstable_by(n, |a, b| b.cmp(a));
+        server.update_commit_index(**highest_matching).await;
+    }
+
     async fn heartbeat(&self, server: &mut Server) {
         // We use AppendEntries messages for heartbeat.
         // It is a countermeasure to deal with lost packets / slow followers etc.
@@ -45,26 +59,38 @@ impl Leader {
     }
 
     pub(crate) async fn transition_from_canditate(server: &mut Server) -> ServerState {
-        server
-            .pstate
-            .update_with(|ps| {
-                ps.voted_for = Some(server.config.self_id);
-                ps.leader_id = Some(server.config.self_id);
-            })
-            .await;
+        let mut guard = server.pstate.mutate();
+        guard.voted_for = Some(server.config.self_id);
+        guard.leader_id = Some(server.config.self_id);
+        let noop_entry = LogEntry {
+            term: guard.current_term,
+            timestamp: SystemTime::now(),
+            content: LogEntryContent::NoOp,
+        };
+        guard.log.push(noop_entry);
+        guard.save().await;
 
         let next_index = server
             .all_servers
             .iter()
             .cloned()
-            .map(|s| (s, server.log.last_index() + 1))
+            .filter(|id| *id != server.config.self_id)
+            .map(|s| (s, server.log().last_index()))
             .collect();
-        let match_index = server.all_servers.iter().cloned().map(|s| (s, 0)).collect();
+        let match_index = server
+            .all_servers
+            .iter()
+            .cloned()
+            .filter(|id| *id != server.config.self_id)
+            .map(|s| (s, 0))
+            .collect();
 
         Leader {
             next_index,
             match_index,
             heartbeat_timer: Timer::new_heartbeat_timer(server),
+            heartbeat_responders: [server.config.self_id].into(),
+            heartbeat_response_timer: Timer::new_heartbeat_response_timer(server),
         }
         .into()
     }
@@ -77,7 +103,41 @@ impl RaftState for Leader {
         server: &mut Server,
         msg: RaftMessage,
     ) -> Option<ServerState> {
-        todo!()
+        if msg.header.term < server.pstate.current_term {
+            server.respond_false(&msg).await;
+            return None;
+        }
+        match msg.content {
+            RaftMessageContent::AppendEntriesResponse(args) => {
+                let source = msg.header.source;
+                let last_log_index = args.last_verified_log_index;
+
+                self.heartbeat_responders.insert(source);
+
+                if args.success {
+                    self.match_index.insert(source, last_log_index);
+                    self.next_index.insert(source, last_log_index + 1);
+                } else {
+                    self.next_index.insert(
+                        source,
+                        min(server.log().last_index() + 1, self.next_index[&source] - 1),
+                    );
+                }
+
+                self.advance_commit_index(server).await;
+
+                if self.next_index[&source] <= server.log().last_index() {
+                    self.replicate_log_with_follower(server, source).await;
+                }
+            }
+            RaftMessageContent::InstallSnapshot(_args) => unimplemented!("Snapshots omitted"),
+            RaftMessageContent::InstallSnapshotResponse(_args) => {
+                unimplemented!("Snapshots omitted")
+            }
+            _ => (),
+        }
+
+        None
     }
 
     async fn handle_client_req(&mut self, server: &mut Server, req: ClientRequest) {
@@ -94,7 +154,17 @@ impl RaftState for Leader {
         match msg {
             Timeout::Heartbeat => {
                 self.heartbeat(server).await;
+                self.heartbeat_timer.reset();
                 None
+            }
+            Timeout::HeartbeatResponse => {
+                if self.heartbeat_responders.len() <= server.all_servers.len() / 2 {
+                    Some(Follower::new(server).into())
+                } else {
+                    self.heartbeat_response_timer.reset();
+                    self.heartbeat_responders = [server.config.self_id].into();
+                    None
+                }
             }
             _ => None,
         }
