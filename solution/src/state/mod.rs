@@ -18,16 +18,9 @@ use crate::{time::Timeout, ClientRequest, RaftMessage, Server};
 #[async_trait::async_trait]
 pub(crate) trait RaftState {
     /// Called every time a new Raft message is received, before the actual processing of a message.
-    async fn at_new_raft_message(
-        &mut self,
-        server: &mut Server,
-        msg: &RaftMessage,
-    ) -> Option<ServerState> {
-        if msg.header.term > server.pstate.current_term {
-            Some(Follower::follow_new_term_leader(server, msg.header.term, msg.header.source).await)
-        } else {
-            None
-        }
+    /// Returns true if the message should be processed and false if it should be ignored.
+    fn filter_raft_msg(&self, _server: &Server, _msg: &RaftMessage) -> bool {
+        true
     }
 
     async fn handle_raft_msg(
@@ -49,22 +42,18 @@ pub(crate) enum ServerState {
 
 impl ServerState {
     pub(crate) fn initial() -> ServerState {
-        Follower::initial().into()
+        Follower::observer().into()
     }
 }
 
 #[async_trait::async_trait]
 impl RaftState for ServerState {
-    async fn at_new_raft_message(
-        &mut self,
-        server: &mut Server,
-        msg: &RaftMessage,
-    ) -> Option<ServerState> {
+    fn filter_raft_msg(&self, server: &Server, msg: &RaftMessage) -> bool {
         // Delegate it to the inner state.
         match self {
-            ServerState::Follower(inner) => inner.at_new_raft_message(server, msg).await,
-            ServerState::Candidate(inner) => inner.at_new_raft_message(server, msg).await,
-            ServerState::Leader(inner) => inner.at_new_raft_message(server, msg).await,
+            ServerState::Follower(inner) => inner.filter_raft_msg(server, msg),
+            ServerState::Candidate(inner) => inner.filter_raft_msg(server, msg),
+            ServerState::Leader(inner) => inner.filter_raft_msg(server, msg),
         }
     }
 
@@ -73,6 +62,23 @@ impl RaftState for ServerState {
         server: &mut Server,
         msg: RaftMessage,
     ) -> Option<ServerState> {
+        // All RPCs: reply false if term < currentTerm.
+        if msg.header.term < server.pstate.current_term {
+            server.respond_false(&msg).await;
+            return None;
+        }
+
+        // All servers: if request or response contains a newer term,
+        // set current_term and convert to follower (3.3).
+        if msg.header.term > server.pstate.current_term {
+            let mut follower = Follower::new_term_discovered(server, msg.header.term).await;
+            return follower
+                .handle_raft_msg(server, msg)
+                .await
+                .or(Some(follower));
+        }
+
+        // Otherwise delegate message to the inner state assuming term == current_term.
         match self {
             ServerState::Follower(inner) => inner.handle_raft_msg(server, msg).await,
             ServerState::Candidate(inner) => inner.handle_raft_msg(server, msg).await,

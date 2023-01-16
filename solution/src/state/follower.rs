@@ -8,13 +8,16 @@ use crate::{
 pub(crate) struct Follower {
     leader: Option<Uuid>,
     election_timer: Option<Timer>,
+    minimum_election_timer: Option<Timer>,
 }
 
 impl Follower {
-    pub(crate) fn initial() -> Follower {
+    // Creates a passive follower which will not become a candidate.
+    pub(crate) fn observer() -> Follower {
         Follower {
             leader: None,
             election_timer: None,
+            minimum_election_timer: None,
         }
     }
 
@@ -22,22 +25,21 @@ impl Follower {
         Follower {
             leader: None,
             election_timer: Timer::new_election_timer(server).into(),
+            minimum_election_timer: None,
         }
     }
 
-    pub(crate) fn follow_leader(server: &Server, leader: Uuid) -> ServerState {
+    pub(crate) fn new_leader_discovered(server: &Server, leader: Uuid) -> ServerState {
         Follower {
             leader: leader.into(),
             election_timer: Timer::new_election_timer(server).into(),
+            minimum_election_timer: Timer::new_minimum_election_timer(server).into(),
         }
         .into()
     }
 
-    pub(crate) async fn follow_new_term_leader(
-        server: &mut Server,
-        term: u64,
-        leader: Uuid,
-    ) -> ServerState {
+    pub(crate) async fn new_term_discovered(server: &mut Server, term: u64) -> ServerState {
+        println!("follower: new term discovered");
         server
             .pstate
             .update_with(|ps| {
@@ -46,33 +48,41 @@ impl Follower {
                 ps.leader_id = None;
             })
             .await;
-        Follower::follow_leader(server, leader)
+        Follower::new(server).into()
     }
 
-    pub(crate) fn reset_timer(&mut self, server: &Server) {
-        if let Some(timer) = &mut self.election_timer {
-            timer.reset();
-        } else {
-            self.election_timer = Some(Timer::new_election_timer(server));
-        }
+    pub(crate) fn reset_timers(&mut self, server: &Server) {
+        // We stop old timers by dropping them.
+        self.election_timer = Some(Timer::new_election_timer(server));
+        self.minimum_election_timer = Some(Timer::new_minimum_election_timer(server));
     }
 }
 
 #[async_trait::async_trait]
 impl RaftState for Follower {
+    fn filter_raft_msg(&self, _server: &Server, msg: &RaftMessage) -> bool {
+        // We filter out RequestVote messages until minimum election timer goes off.
+        !(matches!(msg.content, RaftMessageContent::RequestVote(_))
+            && self.minimum_election_timer.is_some())
+    }
+
     async fn handle_raft_msg(
         &mut self,
         server: &mut Server,
         msg: RaftMessage,
     ) -> Option<ServerState> {
-        if msg.header.term < server.pstate.current_term {
-            server.respond_false(&msg).await;
-            return None;
-        }
         match msg.content {
             RaftMessageContent::AppendEntries(args) => {
-                // Reset election timer.
-                self.reset_timer(server);
+                println!("follower: append entries");
+
+                // Follow the leader.
+                self.leader = Some(msg.header.source);
+
+                // Reset timers.
+                self.reset_timers(server);
+
+                // Save `last_verified_log_index` for later
+                let last_verified_log_index = args.entries.len() + args.prev_log_index;
 
                 // Append entries to the log, save it.
                 let mut guard = server.pstate.mutate();
@@ -89,20 +99,25 @@ impl RaftState for Follower {
                 server.update_commit_index(args.leader_commit).await;
 
                 // Send response to the leader.
+                println!(
+                    "follower: returning last index: {:?}",
+                    last_verified_log_index
+                );
                 let response = AppendEntriesResponseArgs {
                     success,
-                    last_verified_log_index: server.log().last_index(),
+                    last_verified_log_index,
                 };
                 server.respond_with(&msg.header, response.into()).await;
             }
             RaftMessageContent::RequestVote(args) => {
+                println!("follower: requested vote");
                 // Check if we can vote in the current term for this candidate
                 // and the candidate's log is up to date with our log.
+                let candidate_log_md = (args.last_log_term, args.last_log_index).into();
                 let vote_granted = if server.can_vote_for(msg.header.source)
-                    && server
-                        .log()
-                        .is_up_to_date_with((args.last_log_term, args.last_log_index).into())
+                    && server.log().is_up_to_date_with(candidate_log_md)
                 {
+                    println!("follower: vote granted");
                     // If so, take our voting ticket and vote for the candidate.
                     server
                         .pstate
@@ -138,8 +153,13 @@ impl RaftState for Follower {
     }
 
     async fn handle_timeout(&mut self, server: &mut Server, msg: Timeout) -> Option<ServerState> {
+        println!("follower: timeout!");
         match msg {
             Timeout::Election => Some(Candidate::transition_from_follower(server).await),
+            Timeout::ElectionMinimum => {
+                self.minimum_election_timer.take();
+                None
+            }
             _ => None,
         }
     }

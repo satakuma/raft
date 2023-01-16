@@ -1,5 +1,8 @@
+use async_channel::Sender;
 use executor::{Handler, ModuleRef, System};
-use std::{cmp::min, collections::HashSet, time::SystemTime};
+use std::cmp::{max, min};
+use std::collections::{HashMap, HashSet};
+use std::time::SystemTime;
 use uuid::Uuid;
 
 mod domain;
@@ -10,8 +13,6 @@ use storage::{Log, Persistent, PersistentState, Storage};
 
 mod state;
 pub(crate) use state::{Candidate, Follower, Leader, RaftState, ServerState};
-
-pub(crate) mod util;
 
 pub(crate) mod time;
 pub(crate) use time::{Timeout, Timer};
@@ -24,6 +25,7 @@ struct Server {
     sender: Box<dyn RaftSender>,
 
     all_servers: HashSet<Uuid>,
+    clients: HashMap<Uuid, Sender<ClientRequestResponse>>,
 
     pstate: Persistent<PersistentState>,
     commit_index: usize,
@@ -44,11 +46,50 @@ impl Server {
         self.pstate.voted_for.is_none() || self.pstate.voted_for == Some(candidate_id)
     }
 
+    pub(crate) fn get_client_id(&self, index: usize) -> Uuid {
+        Uuid::from_u128(index as _)
+    }
+
     pub(crate) async fn update_commit_index(&mut self, new_commit_index: usize) {
         let new_commit_index = min(self.log().last_index(), new_commit_index);
-        while self.commit_index < new_commit_index {
-            // TODO: apply to the state machine
-            self.commit_index += 1;
+        self.commit_index = max(self.commit_index, new_commit_index);
+        while self.last_applied < self.commit_index {
+            self.apply_log_entry(self.last_applied + 1).await;
+            self.last_applied += 1;
+        }
+    }
+
+    async fn apply_log_entry(&mut self, index: usize) {
+        let entry = &self.pstate.log[index];
+        match &entry.content {
+            LogEntryContent::Command {
+                data,
+                client_id,
+                sequence_num,
+                lowest_sequence_num_without_response: _,
+            } => {
+                let output = self.state_machine.apply(data).await;
+                if let Some(sender) = self.clients.get(client_id) {
+                    // TODO sequence_num?
+                    let response = CommandResponseArgs {
+                        client_id: *client_id,
+                        sequence_num: *sequence_num,
+                        content: CommandResponseContent::CommandApplied { output },
+                    };
+                    let _ = sender.send(response.into()).await;
+                }
+            }
+            LogEntryContent::Configuration { .. } => {}
+            LogEntryContent::RegisterClient => {
+                let client_id = self.get_client_id(index);
+                if let Some(sender) = self.clients.get(&client_id) {
+                    let response = RegisterClientResponseArgs {
+                        content: RegisterClientResponseContent::ClientRegistered { client_id },
+                    };
+                    let _ = sender.send(response.into()).await;
+                }
+            }
+            LogEntryContent::NoOp => {}
         }
     }
 
@@ -95,19 +136,23 @@ impl Server {
 
     pub(crate) async fn respond_not_leader(&self, req: ClientRequest, leader_hint: Option<Uuid>) {
         let response = match req.content {
-            ClientRequestContent::Command { .. } => CommandResponseArgs {
-                client_id: todo!(),
-                sequence_num: todo!(),
+            ClientRequestContent::Command {
+                client_id,
+                sequence_num,
+                ..
+            } => CommandResponseArgs {
+                client_id,
+                sequence_num,
                 content: CommandResponseContent::NotLeader { leader_hint },
             }
             .into(),
-            ClientRequestContent::AddServer { .. } => AddServerResponseArgs {
-                new_server: todo!(),
+            ClientRequestContent::AddServer { new_server } => AddServerResponseArgs {
+                new_server,
                 content: AddServerResponseContent::NotLeader { leader_hint },
             }
             .into(),
-            ClientRequestContent::RemoveServer { .. } => RemoveServerResponseArgs {
-                old_server: todo!(),
+            ClientRequestContent::RemoveServer { old_server } => RemoveServerResponseArgs {
+                old_server,
                 content: RemoveServerResponseContent::NotLeader { leader_hint },
             }
             .into(),
@@ -168,6 +213,7 @@ impl Raft {
             state_machine,
             sender: message_sender,
             all_servers: config.servers.clone(),
+            clients: HashMap::new(),
             pstate,
             config,
             commit_index: 0,
@@ -183,9 +229,14 @@ impl Raft {
     }
 
     async fn handle_raft_msg(&mut self, msg: RaftMessage) {
-        let transition = self.state.handle_raft_msg(&mut self.server, msg).await;
-        if let Some(next_state) = transition {
-            self.state = next_state;
+        if self.state.filter_raft_msg(&self.server, &msg) {
+            let transition = self.state.handle_raft_msg(&mut self.server, msg).await;
+            println!("raft: after creating transition");
+            if let Some(next_state) = transition {
+                self.state = next_state;
+                println!("raft: transition applied");
+            }
+            println!("raft: quiting raft msg handler");
         }
     }
 
@@ -223,6 +274,7 @@ impl Handler<RaftMessage> for Raft {
 #[async_trait::async_trait]
 impl Handler<ClientRequest> for Raft {
     async fn handle(&mut self, _self_ref: &ModuleRef<Self>, msg: ClientRequest) {
+        println!("handling client request");
         self.handle_client_req(msg).await;
     }
 }

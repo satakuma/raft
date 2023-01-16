@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     ClientRequest, ClientRequestContent, Follower, Leader, RaftMessage, RaftMessageContent,
-    RaftState, RequestVoteResponseArgs, Server, ServerState, Timeout, Timer,
+    RaftState, RequestVoteArgs, Server, ServerState, Timeout, Timer,
 };
 
 pub(crate) struct Candidate {
@@ -29,11 +29,22 @@ impl Candidate {
         if candidate.ballot_box.add_vote(Vote::self_vote(server)) == VotingResult::Won {
             Leader::transition_from_canditate(server).await.into()
         } else {
+            let (last_log_term, last_log_index) = server.log().last_metadata().into();
+            server
+                .broadcast(
+                    RequestVoteArgs {
+                        last_log_term,
+                        last_log_index,
+                    }
+                    .into(),
+                )
+                .await;
             candidate.into()
         }
     }
 
     pub(crate) async fn transition_from_follower(server: &mut Server) -> ServerState {
+        println!("candidate: transition from follower");
         Candidate::new(server).await
     }
 
@@ -49,18 +60,15 @@ impl RaftState for Candidate {
         server: &mut Server,
         msg: RaftMessage,
     ) -> Option<ServerState> {
-        if msg.header.term < server.pstate.current_term {
-            server.respond_false(&msg).await;
-            return None;
-        }
         match msg.content {
             RaftMessageContent::AppendEntries(_) => {
                 // If we receive an AppendEntries message with current term, we convert
                 // to a follower and handle the message as a follower.
-                let mut follower = Follower::follow_leader(server, msg.header.source);
-                let followers_transition = follower.handle_raft_msg(server, msg).await;
-                assert!(followers_transition.is_none());
-                Some(follower)
+                let mut follower = Follower::new_leader_discovered(server, msg.header.source);
+                follower
+                    .handle_raft_msg(server, msg)
+                    .await
+                    .or(Some(follower))
             }
             RaftMessageContent::RequestVote(_) => {
                 // Respond false because we already voted for ourself.

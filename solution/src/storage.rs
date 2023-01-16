@@ -25,6 +25,12 @@ impl From<(u64, usize)> for LogEntryMetadata {
     }
 }
 
+impl Into<(u64, usize)> for LogEntryMetadata {
+    fn into(self) -> (u64, usize) {
+        (self.term, self.index)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Log {
     entries: Vec<LogEntry>,
@@ -58,7 +64,7 @@ impl Log {
     }
 
     pub(crate) fn is_up_to_date_with(&self, term_index: LogEntryMetadata) -> bool {
-        self.last_metadata() < term_index
+        self.last_metadata() <= term_index
     }
 
     pub(crate) async fn append_entries(
@@ -66,12 +72,18 @@ impl Log {
         new_entries: Vec<LogEntry>,
         prev_log_md: LogEntryMetadata,
     ) -> bool {
+        println!(
+            "append_entries: new_entries {:?}, prev_log: {:?}, our md {:?}",
+            &new_entries,
+            prev_log_md,
+            self.get_metadata(prev_log_md.index)
+        );
         if self.get_metadata(prev_log_md.index) != Some(prev_log_md) {
             return false;
         }
 
         for (i, entry) in new_entries.into_iter().enumerate() {
-            match self.get_metadata(prev_log_md.index + i) {
+            match self.get_metadata(prev_log_md.index + i + 1) {
                 Some(md) if md == prev_log_md => {
                     // This entry is already in the log.
                     continue;
@@ -79,7 +91,7 @@ impl Log {
                 _ => {
                     // Log entries from this point either conflict or don't exist.
                     // Truncate the log (possibly no-op) and add a new entry.
-                    self.truncate(prev_log_md.index + i);
+                    self.truncate(prev_log_md.index + i + 1);
                     self.push(entry);
                 }
             }

@@ -34,11 +34,21 @@ impl Timer {
         Timer::new(server.self_ref(), dur, Timeout::Election)
     }
 
+    pub(crate) fn new_minimum_election_timer(server: &Server) -> Timer {
+        println!(
+            "range {:?}, start {:?}",
+            &server.config.election_timeout_range,
+            server.config.election_timeout_range.start()
+        );
+        let dur = *server.config.election_timeout_range.start();
+        Timer::new(server.self_ref(), dur, Timeout::ElectionMinimum)
+    }
+
     pub(crate) fn new_heartbeat_timer(server: &Server) -> Timer {
         Timer::new(
             server.self_ref(),
             server.config.heartbeat_timeout,
-            Timeout::Election,
+            Timeout::Heartbeat,
         )
     }
 
@@ -71,6 +81,7 @@ impl Timer {
 #[derive(Clone, Debug)]
 pub(crate) enum Timeout {
     Election,
+    ElectionMinimum,
     Heartbeat,
     HeartbeatResponse,
 }

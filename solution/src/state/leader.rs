@@ -22,6 +22,7 @@ pub(crate) struct Leader {
 impl Leader {
     async fn replicate_log_with_follower(&self, server: &Server, follower: Uuid) {
         let prev_log_index = self.next_index[&follower] - 1;
+        let prev_log_term = server.log().get_metadata(prev_log_index).unwrap().term;
 
         let num_entries = min(
             server.log().last_index() - prev_log_index,
@@ -29,7 +30,7 @@ impl Leader {
         );
         let msg = AppendEntriesArgs {
             prev_log_index,
-            prev_log_term: server.pstate.current_term,
+            prev_log_term,
             entries: server.log()[prev_log_index + 1..prev_log_index + 1 + num_entries].to_vec(),
             leader_commit: server.commit_index,
         };
@@ -45,9 +46,10 @@ impl Leader {
     }
 
     async fn advance_commit_index(&mut self, server: &mut Server) {
-        let n = server.all_servers.len() / 2; // we don't count ourself here
+        let num_majority = server.all_servers.len() / 2; // we don't count ourself here
         let mut indexes = self.match_index.values().collect::<Vec<_>>();
-        let (_, highest_matching, _) = indexes.select_nth_unstable_by(n, |a, b| b.cmp(a));
+        let (_, highest_matching, _) =
+            indexes.select_nth_unstable_by(num_majority - 1, |a, b| b.cmp(a));
         server.update_commit_index(**highest_matching).await;
     }
 
@@ -98,15 +100,16 @@ impl Leader {
 
 #[async_trait::async_trait]
 impl RaftState for Leader {
+    fn filter_raft_msg(&self, _server: &Server, msg: &RaftMessage) -> bool {
+        // We filter out RequestVote messages until minimum election timer goes off.
+        !matches!(msg.content, RaftMessageContent::RequestVote(_))
+    }
+
     async fn handle_raft_msg(
         &mut self,
         server: &mut Server,
         msg: RaftMessage,
     ) -> Option<ServerState> {
-        if msg.header.term < server.pstate.current_term {
-            server.respond_false(&msg).await;
-            return None;
-        }
         match msg.content {
             RaftMessageContent::AppendEntriesResponse(args) => {
                 let source = msg.header.source;
@@ -142,11 +145,50 @@ impl RaftState for Leader {
 
     async fn handle_client_req(&mut self, server: &mut Server, req: ClientRequest) {
         match req.content {
-            ClientRequestContent::Command { .. } => todo!(),
+            ClientRequestContent::RegisterClient => {
+                let log_entry = LogEntry {
+                    term: server.pstate.current_term,
+                    timestamp: SystemTime::now(),
+                    content: LogEntryContent::RegisterClient,
+                };
+                server
+                    .pstate
+                    .update_with(|ps| {
+                        ps.log.push(log_entry);
+                    })
+                    .await;
+
+                let client_id = server.get_client_id(server.log().last_index());
+                server.clients.insert(client_id, req.reply_to);
+                self.replicate_log(server).await;
+            }
+            ClientRequestContent::Command {
+                command,
+                client_id,
+                sequence_num,
+                lowest_sequence_num_without_response,
+            } => {
+                let log_entry = LogEntry {
+                    term: server.pstate.current_term,
+                    timestamp: SystemTime::now(),
+                    content: LogEntryContent::Command {
+                        data: command,
+                        client_id,
+                        sequence_num,
+                        lowest_sequence_num_without_response,
+                    },
+                };
+                server
+                    .pstate
+                    .update_with(|ps| {
+                        ps.log.push(log_entry);
+                    })
+                    .await;
+                self.replicate_log(server).await;
+            }
             ClientRequestContent::Snapshot => todo!(),
             ClientRequestContent::AddServer { .. } => todo!(),
             ClientRequestContent::RemoveServer { .. } => todo!(),
-            ClientRequestContent::RegisterClient => todo!(),
         }
     }
 
