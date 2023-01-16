@@ -231,12 +231,9 @@ impl Raft {
     async fn handle_raft_msg(&mut self, msg: RaftMessage) {
         if self.state.filter_raft_msg(&self.server, &msg) {
             let transition = self.state.handle_raft_msg(&mut self.server, msg).await;
-            println!("raft: after creating transition");
             if let Some(next_state) = transition {
                 self.state = next_state;
-                println!("raft: transition applied");
             }
-            println!("raft: quiting raft msg handler");
         }
     }
 
@@ -274,7 +271,6 @@ impl Handler<RaftMessage> for Raft {
 #[async_trait::async_trait]
 impl Handler<ClientRequest> for Raft {
     async fn handle(&mut self, _self_ref: &ModuleRef<Self>, msg: ClientRequest) {
-        println!("handling client request");
         self.handle_client_req(msg).await;
     }
 }

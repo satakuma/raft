@@ -282,7 +282,7 @@ mod conv_impls {
         };
     }
     
-    // Conversion for RaftMessageContent from inner structs
+    // Conversion to RaftMessageContent from inner structs
     impl_args_conversion!(RaftMessageContent, AppendEntries, AppendEntriesArgs);
     impl_args_conversion!(RaftMessageContent, AppendEntriesResponse, AppendEntriesResponseArgs);
     impl_args_conversion!(RaftMessageContent, RequestVote, RequestVoteArgs);
@@ -290,7 +290,7 @@ mod conv_impls {
     impl_args_conversion!(RaftMessageContent, InstallSnapshot, InstallSnapshotArgs);
     impl_args_conversion!(RaftMessageContent, InstallSnapshotResponse, InstallSnapshotResponseArgs);
 
-    // Conversion for ClientRequestResponse from inner structs
+    // Conversion to ClientRequestResponse from inner structs
     impl_args_conversion!(ClientRequestResponse, CommandResponse, CommandResponseArgs);
     impl_args_conversion!(ClientRequestResponse, SnapshotResponse, SnapshotResponseArgs);
     impl_args_conversion!(ClientRequestResponse, AddServerResponse, AddServerResponseArgs);

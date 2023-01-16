@@ -39,7 +39,6 @@ impl Follower {
     }
 
     pub(crate) async fn new_term_discovered(server: &mut Server, term: u64) -> ServerState {
-        println!("follower: new term discovered");
         server
             .pstate
             .update_with(|ps| {
@@ -73,8 +72,6 @@ impl RaftState for Follower {
     ) -> Option<ServerState> {
         match msg.content {
             RaftMessageContent::AppendEntries(args) => {
-                println!("follower: append entries");
-
                 // Follow the leader.
                 self.leader = Some(msg.header.source);
 
@@ -99,10 +96,6 @@ impl RaftState for Follower {
                 server.update_commit_index(args.leader_commit).await;
 
                 // Send response to the leader.
-                println!(
-                    "follower: returning last index: {:?}",
-                    last_verified_log_index
-                );
                 let response = AppendEntriesResponseArgs {
                     success,
                     last_verified_log_index,
@@ -110,14 +103,12 @@ impl RaftState for Follower {
                 server.respond_with(&msg.header, response.into()).await;
             }
             RaftMessageContent::RequestVote(args) => {
-                println!("follower: requested vote");
                 // Check if we can vote in the current term for this candidate
                 // and the candidate's log is up to date with our log.
                 let candidate_log_md = (args.last_log_term, args.last_log_index).into();
                 let vote_granted = if server.can_vote_for(msg.header.source)
                     && server.log().is_up_to_date_with(candidate_log_md)
                 {
-                    println!("follower: vote granted");
                     // If so, take our voting ticket and vote for the candidate.
                     server
                         .pstate
@@ -153,7 +144,6 @@ impl RaftState for Follower {
     }
 
     async fn handle_timeout(&mut self, server: &mut Server, msg: Timeout) -> Option<ServerState> {
-        println!("follower: timeout!");
         match msg {
             Timeout::Election => Some(Candidate::transition_from_follower(server).await),
             Timeout::ElectionMinimum => {

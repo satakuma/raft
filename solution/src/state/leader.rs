@@ -46,11 +46,17 @@ impl Leader {
     }
 
     async fn advance_commit_index(&mut self, server: &mut Server) {
-        let num_majority = server.all_servers.len() / 2; // we don't count ourself here
-        let mut indexes = self.match_index.values().collect::<Vec<_>>();
-        let (_, highest_matching, _) =
-            indexes.select_nth_unstable_by(num_majority - 1, |a, b| b.cmp(a));
-        server.update_commit_index(**highest_matching).await;
+        // Minimum number of other servers for a majority (we don't count ourself here).
+        let num_majority = server.all_servers.len() / 2;
+        if num_majority > 0 {
+            let mut indexes = self.match_index.values().collect::<Vec<_>>();
+            let majority_index = indexes
+                .select_nth_unstable_by(num_majority - 1, |a, b| b.cmp(a))
+                .1;
+            server.update_commit_index(**majority_index).await;
+        } else {
+            server.update_commit_index(server.log().last_index()).await;
+        }
     }
 
     async fn heartbeat(&self, server: &mut Server) {
@@ -161,6 +167,7 @@ impl RaftState for Leader {
                 let client_id = server.get_client_id(server.log().last_index());
                 server.clients.insert(client_id, req.reply_to);
                 self.replicate_log(server).await;
+                self.advance_commit_index(server).await;
             }
             ClientRequestContent::Command {
                 command,
@@ -185,6 +192,7 @@ impl RaftState for Leader {
                     })
                     .await;
                 self.replicate_log(server).await;
+                self.advance_commit_index(server).await;
             }
             ClientRequestContent::Snapshot => todo!(),
             ClientRequestContent::AddServer { .. } => todo!(),

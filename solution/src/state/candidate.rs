@@ -44,7 +44,6 @@ impl Candidate {
     }
 
     pub(crate) async fn transition_from_follower(server: &mut Server) -> ServerState {
-        println!("candidate: transition from follower");
         Candidate::new(server).await
     }
 

@@ -35,11 +35,6 @@ impl Timer {
     }
 
     pub(crate) fn new_minimum_election_timer(server: &Server) -> Timer {
-        println!(
-            "range {:?}, start {:?}",
-            &server.config.election_timeout_range,
-            server.config.election_timeout_range.start()
-        );
         let dur = *server.config.election_timeout_range.start();
         Timer::new(server.self_ref(), dur, Timeout::ElectionMinimum)
     }

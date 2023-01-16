@@ -72,12 +72,6 @@ impl Log {
         new_entries: Vec<LogEntry>,
         prev_log_md: LogEntryMetadata,
     ) -> bool {
-        println!(
-            "append_entries: new_entries {:?}, prev_log: {:?}, our md {:?}",
-            &new_entries,
-            prev_log_md,
-            self.get_metadata(prev_log_md.index)
-        );
         if self.get_metadata(prev_log_md.index) != Some(prev_log_md) {
             return false;
         }
