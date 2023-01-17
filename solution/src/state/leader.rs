@@ -6,13 +6,16 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
-    AppendEntriesArgs, ClientRequest, ClientRequestContent, Follower, LogEntry, LogEntryContent,
-    RaftMessage, RaftMessageContent, RaftState, Server, ServerState, Timeout, Timer,
+    snapshot, AppendEntriesArgs, ClientRequest, ClientRequestContent, Follower, LogEntry,
+    LogEntryContent, RaftMessage, RaftMessageContent, RaftState, Server, ServerState, Timeout,
+    Timer,
 };
 
 pub(crate) struct Leader {
     next_index: HashMap<Uuid, usize>,
     match_index: HashMap<Uuid, usize>,
+    snapshot_senders: HashMap<Uuid, snapshot::Sender>,
+
     heartbeat_timer: Timer,
 
     heartbeat_responders: HashSet<Uuid>,
@@ -20,29 +23,68 @@ pub(crate) struct Leader {
 }
 
 impl Leader {
-    async fn replicate_log_with_follower(&self, server: &Server, follower: Uuid) {
-        let prev_log_index = self.next_index[&follower] - 1;
+    /// Assumes that required entries to append are present in our log.
+    async fn send_append_entries_to_follower(&self, server: &Server, follower: Uuid) {
+        let next_index = self.next_index[&follower];
+        let match_index = self.match_index[&follower];
+
+        let prev_log_index = next_index - 1;
         let prev_log_term = server.log().get_metadata(prev_log_index).unwrap().term;
 
-        let num_entries = min(
-            server.log().last_index() - prev_log_index,
-            server.config.append_entries_batch_size,
-        );
+        let entries = if match_index + 1 == next_index {
+            let num_entries = min(
+                server.log().last_index() - prev_log_index,
+                server.config.append_entries_batch_size,
+            );
+            server
+                .log()
+                .slice(prev_log_index + 1, prev_log_index + 1 + num_entries)
+                .to_vec()
+        } else {
+            Vec::new()
+        };
+
         let msg = AppendEntriesArgs {
             prev_log_index,
             prev_log_term,
-            entries: server.log()[prev_log_index + 1..prev_log_index + 1 + num_entries].to_vec(),
+            entries,
             leader_commit: server.commit_index,
         };
         server.send(follower, msg.into()).await;
     }
 
-    async fn replicate_log(&self, server: &mut Server) {
+    async fn replicate_log_with_follower(&mut self, server: &Server, follower: Uuid) {
+        // Check if there is snapshot transmission in progress.
+        if let Some(sender) = self.snapshot_senders.get(&follower) {
+            sender.send_chunk(server).await;
+            return;
+        }
+
+        // Check if we have required entires to replicate in the log.
+        if server.log().first_not_snapshotted_index() <= self.next_index[&follower] {
+            self.send_append_entries_to_follower(server, follower).await;
+        } else {
+            // Otherwise send our snapshot to this slow follower.
+            let sender = snapshot::Sender::new(
+                server.log().snapshot().unwrap().clone(),
+                server.config.snapshot_chunk_size,
+                follower,
+            );
+            sender.send_chunk(server).await;
+            self.snapshot_senders.insert(follower, sender);
+        }
+    }
+
+    async fn replicate_log(&mut self, server: &mut Server) {
         for server_id in &server.all_servers {
             if *server_id != server.config.self_id {
                 self.replicate_log_with_follower(server, *server_id).await;
             }
         }
+    }
+
+    async fn heartbeat(&mut self, server: &mut Server) {
+        self.replicate_log(server).await;
     }
 
     async fn advance_commit_index(&mut self, server: &mut Server) {
@@ -57,13 +99,6 @@ impl Leader {
         } else {
             server.update_commit_index(server.log().last_index()).await;
         }
-    }
-
-    async fn heartbeat(&self, server: &mut Server) {
-        // We use AppendEntries messages for heartbeat.
-        // It is a countermeasure to deal with lost packets / slow followers etc.
-        // which ensures that eventually all followers will store all log entries.
-        self.replicate_log(server).await;
     }
 
     pub(crate) async fn transition_from_canditate(server: &mut Server) -> ServerState {
@@ -96,6 +131,7 @@ impl Leader {
         Leader {
             next_index,
             match_index,
+            snapshot_senders: HashMap::new(),
             heartbeat_timer: Timer::new_heartbeat_timer(server),
             heartbeat_responders: [server.config.self_id].into(),
             heartbeat_response_timer: Timer::new_heartbeat_response_timer(server),
@@ -106,9 +142,9 @@ impl Leader {
 
 #[async_trait::async_trait]
 impl RaftState for Leader {
-    fn filter_raft_msg(&self, _server: &Server, msg: &RaftMessage) -> bool {
-        // We filter out RequestVote messages until minimum election timer goes off.
-        !matches!(msg.content, RaftMessageContent::RequestVote(_))
+    fn ignore_raft_msg(&self, _server: &Server, msg: &RaftMessage) -> bool {
+        // We filter out RequestVote messages since we are the leader.
+        matches!(msg.content, RaftMessageContent::RequestVote(_))
     }
 
     async fn handle_raft_msg(
@@ -139,9 +175,23 @@ impl RaftState for Leader {
                     self.replicate_log_with_follower(server, source).await;
                 }
             }
-            RaftMessageContent::InstallSnapshot(_args) => unimplemented!("Snapshots omitted"),
-            RaftMessageContent::InstallSnapshotResponse(_args) => {
-                unimplemented!("Snapshots omitted")
+            RaftMessageContent::InstallSnapshotResponse(args) => {
+                let follower = msg.header.source;
+                self.heartbeat_responders.insert(follower);
+
+                if let Some(sender) = self.snapshot_senders.get_mut(&follower) {
+                    match sender.chunk_acknowledged(args.offset) {
+                        snapshot::Status::Pending => sender.send_chunk(server).await,
+                        snapshot::Status::Done => {
+                            let last_included_index = sender.last_included().index;
+                            self.match_index.insert(follower, last_included_index);
+                            self.next_index.insert(follower, last_included_index + 1);
+                            self.snapshot_senders.remove(&follower);
+                            self.replicate_log_with_follower(server, follower).await;
+                        }
+                        snapshot::Status::Duplicate => {}
+                    }
+                }
             }
             _ => (),
         }
@@ -191,12 +241,13 @@ impl RaftState for Leader {
                         ps.log.push(log_entry);
                     })
                     .await;
+
                 self.replicate_log(server).await;
                 self.advance_commit_index(server).await;
             }
-            ClientRequestContent::Snapshot => todo!(),
             ClientRequestContent::AddServer { .. } => todo!(),
             ClientRequestContent::RemoveServer { .. } => todo!(),
+            ClientRequestContent::Snapshot => unreachable!(),
         }
     }
 

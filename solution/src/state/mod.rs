@@ -13,14 +13,14 @@ pub(crate) use candidate::Candidate;
 mod leader;
 pub(crate) use leader::Leader;
 
-use crate::{time::Timeout, ClientRequest, RaftMessage, Server};
+use crate::{time::Timeout, ClientRequest, ClientRequestContent, RaftMessage, Server};
 
 #[async_trait::async_trait]
 pub(crate) trait RaftState {
     /// Called every time a new Raft message is received, before the actual processing of a message.
-    /// Returns true if the message should be processed and false if it should be ignored.
-    fn filter_raft_msg(&self, _server: &Server, _msg: &RaftMessage) -> bool {
-        true
+    /// Returns true if the message should be ignored.
+    fn ignore_raft_msg(&self, _server: &Server, _msg: &RaftMessage) -> bool {
+        false
     }
 
     async fn handle_raft_msg(
@@ -48,12 +48,12 @@ impl ServerState {
 
 #[async_trait::async_trait]
 impl RaftState for ServerState {
-    fn filter_raft_msg(&self, server: &Server, msg: &RaftMessage) -> bool {
+    fn ignore_raft_msg(&self, server: &Server, msg: &RaftMessage) -> bool {
         // Delegate it to the inner state.
         match self {
-            ServerState::Follower(inner) => inner.filter_raft_msg(server, msg),
-            ServerState::Candidate(inner) => inner.filter_raft_msg(server, msg),
-            ServerState::Leader(inner) => inner.filter_raft_msg(server, msg),
+            ServerState::Follower(inner) => inner.ignore_raft_msg(server, msg),
+            ServerState::Candidate(inner) => inner.ignore_raft_msg(server, msg),
+            ServerState::Leader(inner) => inner.ignore_raft_msg(server, msg),
         }
     }
 
@@ -87,11 +87,15 @@ impl RaftState for ServerState {
     }
 
     async fn handle_client_req(&mut self, server: &mut Server, req: ClientRequest) {
-        match self {
-            ServerState::Follower(inner) => inner.handle_client_req(server, req).await,
-            ServerState::Candidate(inner) => inner.handle_client_req(server, req).await,
-            ServerState::Leader(inner) => inner.handle_client_req(server, req).await,
-        };
+        if let ClientRequestContent::Snapshot = &req.content {
+            server.take_snapshot(req.reply_to).await;
+        } else {
+            match self {
+                ServerState::Follower(inner) => inner.handle_client_req(server, req).await,
+                ServerState::Candidate(inner) => inner.handle_client_req(server, req).await,
+                ServerState::Leader(inner) => inner.handle_client_req(server, req).await,
+            };
+        }
     }
 
     async fn handle_timeout(&mut self, server: &mut Server, msg: Timeout) -> Option<ServerState> {

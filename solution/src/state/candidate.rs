@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::{
-    ClientRequest, ClientRequestContent, Follower, Leader, RaftMessage, RaftMessageContent,
-    RaftState, RequestVoteArgs, Server, ServerState, Timeout, Timer,
+    ClientRequest, Follower, Leader, RaftMessage, RaftMessageContent, RaftState, RequestVoteArgs,
+    Server, ServerState, Timeout, Timer,
 };
 
 pub(crate) struct Candidate {
@@ -60,9 +60,9 @@ impl RaftState for Candidate {
         msg: RaftMessage,
     ) -> Option<ServerState> {
         match msg.content {
-            RaftMessageContent::AppendEntries(_) => {
-                // If we receive an AppendEntries message with current term, we convert
-                // to a follower and handle the message as a follower.
+            RaftMessageContent::AppendEntries(_) | RaftMessageContent::InstallSnapshot(_) => {
+                // If we receive an AppendEntries/InstallSnaphot message (heartbeat) with current term,
+                // we convert to a follower and handle the message as a follower.
                 let mut follower = Follower::new_leader_discovered(server, msg.header.source);
                 follower
                     .handle_raft_msg(server, msg)
@@ -83,19 +83,12 @@ impl RaftState for Candidate {
                     None
                 }
             }
-            RaftMessageContent::InstallSnapshot(_args) => unimplemented!("Snapshots omitted"),
-            RaftMessageContent::InstallSnapshotResponse(_args) => {
-                unimplemented!("Snapshots omitted")
-            }
             _ => None,
         }
     }
 
     async fn handle_client_req(&mut self, server: &mut Server, req: ClientRequest) {
-        match req.content {
-            ClientRequestContent::Snapshot => todo!(),
-            _ => server.respond_not_leader(req, None).await,
-        }
+        server.respond_not_leader(req, None).await;
     }
 
     async fn handle_timeout(&mut self, server: &mut Server, msg: Timeout) -> Option<ServerState> {

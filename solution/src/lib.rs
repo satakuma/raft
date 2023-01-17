@@ -8,14 +8,19 @@ use uuid::Uuid;
 mod domain;
 pub use domain::*;
 
-pub(crate) mod storage;
-use storage::{Log, Persistent, PersistentState, Storage};
-
 mod state;
 pub(crate) use state::{Candidate, Follower, Leader, RaftState, ServerState};
 
+pub(crate) mod storage;
+pub(crate) use storage::{Log, Persistent, PersistentState, Storage};
+
+pub(crate) mod snapshot;
+pub(crate) use snapshot::Snapshot;
+
 pub(crate) mod time;
 pub(crate) use time::{Timeout, Timer};
+
+type ClientSender = Sender<ClientRequestResponse>;
 
 struct Server {
     config: ServerConfig,
@@ -25,7 +30,7 @@ struct Server {
     sender: Box<dyn RaftSender>,
 
     all_servers: HashSet<Uuid>,
-    clients: HashMap<Uuid, Sender<ClientRequestResponse>>,
+    clients: HashMap<Uuid, ClientSender>,
 
     pstate: Persistent<PersistentState>,
     commit_index: usize,
@@ -60,7 +65,7 @@ impl Server {
     }
 
     async fn apply_log_entry(&mut self, index: usize) {
-        let entry = &self.pstate.log[index];
+        let entry = self.pstate.log.get(index).unwrap();
         match &entry.content {
             LogEntryContent::Command {
                 data,
@@ -91,6 +96,40 @@ impl Server {
             }
             LogEntryContent::NoOp => {}
         }
+    }
+
+    pub(crate) async fn install_snapshot(&mut self, snapshot: Snapshot) {
+        self.state_machine.initialize(&snapshot.data).await;
+
+        assert!(self.last_applied <= snapshot.last_included.index);
+        self.last_applied = snapshot.last_included.index;
+        self.commit_index = max(self.commit_index, self.last_applied);
+
+        let mut guard = self.pstate.mutate();
+        guard.log.apply_snapshot(snapshot);
+        guard.save().await;
+    }
+
+    pub(crate) async fn take_snapshot(&mut self, client_sender: ClientSender) {
+        let data = self.state_machine.serialize().await;
+
+        let mut guard = self.pstate.mutate();
+        let num_entries_snapshotted = guard.log.take_snapshot(data, self.last_applied);
+        guard.save().await;
+
+        let last_included_index = self.last_applied;
+        let content = if num_entries_snapshotted > 0 {
+            SnapshotResponseContent::SnapshotCreated {
+                last_included_index,
+            }
+        } else {
+            SnapshotResponseContent::NothingToSnapshot {
+                last_included_index,
+            }
+        };
+        let _ = client_sender
+            .send(SnapshotResponseArgs { content }.into())
+            .await;
     }
 
     pub(crate) async fn send(&self, target: Uuid, msg_content: RaftMessageContent) {
@@ -178,7 +217,7 @@ impl Raft {
         system: &mut System,
         config: ServerConfig,
         first_log_entry_timestamp: SystemTime,
-        state_machine: Box<dyn StateMachine>,
+        mut state_machine: Box<dyn StateMachine>,
         stable_storage: Box<dyn StableStorage>,
         message_sender: Box<dyn RaftSender>,
     ) -> ModuleRef<Self> {
@@ -206,6 +245,14 @@ impl Raft {
             });
             guard.save().await;
         }
+        let last_applied = pstate
+            .log
+            .snapshot_last_included()
+            .map(|md| md.index)
+            .unwrap_or(0);
+        if let Some(data) = pstate.log.snapshot_data() {
+            state_machine.initialize(data).await;
+        }
 
         let server = Server {
             self_ref: None,
@@ -216,8 +263,8 @@ impl Raft {
             clients: HashMap::new(),
             pstate,
             config,
-            commit_index: 0,
-            last_applied: 0,
+            commit_index: last_applied,
+            last_applied,
         };
         let raft = Raft {
             server,
@@ -229,7 +276,7 @@ impl Raft {
     }
 
     async fn handle_raft_msg(&mut self, msg: RaftMessage) {
-        if self.state.filter_raft_msg(&self.server, &msg) {
+        if !self.state.ignore_raft_msg(&self.server, &msg) {
             let transition = self.state.handle_raft_msg(&mut self.server, msg).await;
             if let Some(next_state) = transition {
                 self.state = next_state;

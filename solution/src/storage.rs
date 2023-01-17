@@ -1,9 +1,10 @@
 //! StableStorage implementation.
 
-use crate::{LogEntry, StableStorage};
+use crate::{LogEntry, Snapshot, StableStorage};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::cmp::min;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use tokio::fs::{remove_file, rename, File, OpenOptions};
@@ -13,7 +14,7 @@ use uuid::Uuid;
 
 use std::sync::Arc;
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
 pub(crate) struct LogEntryMetadata {
     pub term: u64,
     pub index: usize,
@@ -31,47 +32,115 @@ impl Into<(u64, usize)> for LogEntryMetadata {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct Log {
+    snapshot: Option<Snapshot>,
     entries: Vec<LogEntry>,
 }
 
 impl Log {
-    pub(crate) fn empty() -> Log {
+    pub fn empty() -> Log {
         Log {
+            snapshot: None,
             entries: Vec::new(),
         }
     }
 
-    pub(crate) fn get_metadata(&self, index: usize) -> Option<LogEntryMetadata> {
-        if index < self.len() {
+    pub fn is_empty(&self) -> bool {
+        self.snapshot_size() == 0 && self.entries.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.snapshot_len() + self.entries.len()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&LogEntry> {
+        self.entries.get(index - self.snapshot_len())
+    }
+
+    pub fn slice(&self, from: usize, to: usize) -> &[LogEntry] {
+        let offset = self.snapshot_len();
+        &self.entries[from - offset..to - offset]
+    }
+
+    pub fn push(&mut self, entry: LogEntry) {
+        self.entries.push(entry);
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        assert!(len >= self.snapshot_len());
+        self.entries.truncate(len - self.snapshot_len());
+    }
+
+    pub fn snapshot(&self) -> Option<&Snapshot> {
+        self.snapshot.as_ref()
+    }
+
+    /// Returns number of entries in the snapshot
+    pub fn snapshot_len(&self) -> usize {
+        self.snapshot_last_included().map_or(0, |md| md.index + 1)
+    }
+
+    /// Returns number of bytes of the snapshot
+    pub fn snapshot_size(&self) -> usize {
+        self.snapshot.as_ref().map_or(0, Snapshot::size)
+    }
+
+    /// Returns reference to the snapshot data.
+    pub fn snapshot_data(&self) -> Option<&[u8]> {
+        self.snapshot.as_ref().map(|s| s.data.as_slice())
+    }
+
+    /// Returns metadata of the last included entry in the snapshot or `None`,
+    /// if the snapshot is empty.
+    pub fn snapshot_last_included(&self) -> Option<LogEntryMetadata> {
+        self.snapshot.as_ref().map(|s| s.last_included)
+    }
+
+    pub fn get_metadata(&self, index: usize) -> Option<LogEntryMetadata> {
+        if self.first_not_snapshotted_index() <= index && index < self.len() {
             LogEntryMetadata {
                 term: self.entries[index].term,
                 index,
             }
             .into()
         } else {
-            None
+            // Check if the requested index is the last one included in the snapshot,
+            // as we hold this information and can retrieve it.
+            match self.snapshot_last_included() {
+                Some(md) if md.index == index => Some(md),
+                _ => None,
+            }
         }
     }
 
-    pub(crate) fn last_index(&self) -> usize {
+    pub fn first_not_snapshotted_index(&self) -> usize {
+        self.snapshot_len()
+    }
+
+    pub fn last_index(&self) -> usize {
         self.len() - 1
     }
 
-    pub(crate) fn last_metadata(&self) -> LogEntryMetadata {
-        (self.last().unwrap().term, self.last_index()).into()
+    pub fn last_metadata(&self) -> LogEntryMetadata {
+        if self.entries.is_empty() {
+            self.snapshot_last_included().unwrap()
+        } else {
+            (self.entries.last().unwrap().term, self.last_index()).into()
+        }
     }
 
-    pub(crate) fn is_up_to_date_with(&self, term_index: LogEntryMetadata) -> bool {
+    pub fn is_up_to_date_with(&self, term_index: LogEntryMetadata) -> bool {
         self.last_metadata() <= term_index
     }
 
-    pub(crate) async fn append_entries(
+    pub fn append_entries(
         &mut self,
         new_entries: Vec<LogEntry>,
         prev_log_md: LogEntryMetadata,
     ) -> bool {
+        // This also catches the case where the previous log entry is deeply behind
+        // in our snapshot and we cannot append entries to it.
         if self.get_metadata(prev_log_md.index) != Some(prev_log_md) {
             return false;
         }
@@ -92,18 +161,28 @@ impl Log {
         }
         true
     }
-}
 
-impl Deref for Log {
-    type Target = Vec<LogEntry>;
-    fn deref(&self) -> &Self::Target {
-        &self.entries
+    pub fn apply_snapshot(&mut self, snapshot: Snapshot) -> usize {
+        let num_snapshotted_entries = snapshot.last_included.index + 1 - self.snapshot_len();
+        let max_index = min(num_snapshotted_entries, self.entries.len());
+        self.entries.drain(..max_index);
+        self.snapshot = Some(snapshot);
+
+        num_snapshotted_entries
     }
-}
 
-impl DerefMut for Log {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.entries
+    pub fn take_snapshot(&mut self, data: Vec<u8>, last_index: usize) -> usize {
+        assert!(self.snapshot_len() <= last_index);
+        if last_index < self.first_not_snapshotted_index() {
+            return 0;
+        }
+
+        let last_included_md = match self.get_metadata(last_index) {
+            Some(md) => md,
+            None => return 0,
+        };
+
+        self.apply_snapshot(Snapshot::new(data, last_included_md))
     }
 }
 
