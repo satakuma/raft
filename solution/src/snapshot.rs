@@ -115,6 +115,8 @@ impl Receiver {
     }
 
     pub fn receive_chunk(&mut self, args: InstallSnapshotArgs) -> Status {
+        assert_eq!(self.data.len(), args.offset);
+
         self.data.extend_from_slice(&args.data);
         self.last_log = Some((args.last_included_term, args.last_included_index).into());
         self.last_config = self.last_config.take().or(args.last_config);

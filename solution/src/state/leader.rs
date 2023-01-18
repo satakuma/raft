@@ -180,16 +180,18 @@ impl RaftState for Leader {
                 self.heartbeat_responders.insert(follower);
 
                 if let Some(sender) = self.snapshot_senders.get_mut(&follower) {
-                    match sender.chunk_acknowledged(args.offset) {
-                        snapshot::Status::Pending => sender.send_chunk(server).await,
-                        snapshot::Status::Done => {
-                            let last_included_index = sender.last_included().index;
-                            self.match_index.insert(follower, last_included_index);
-                            self.next_index.insert(follower, last_included_index + 1);
-                            self.snapshot_senders.remove(&follower);
-                            self.replicate_log_with_follower(server, follower).await;
+                    if sender.last_included().index == args.last_included_index {
+                        match sender.chunk_acknowledged(args.offset) {
+                            snapshot::Status::Pending => sender.send_chunk(server).await,
+                            snapshot::Status::Done => {
+                                let last_included_index = sender.last_included().index;
+                                self.match_index.insert(follower, last_included_index);
+                                self.next_index.insert(follower, last_included_index + 1);
+                                self.snapshot_senders.remove(&follower);
+                                self.replicate_log_with_follower(server, follower).await;
+                            }
+                            snapshot::Status::Duplicate => {}
                         }
-                        snapshot::Status::Duplicate => {}
                     }
                 }
             }

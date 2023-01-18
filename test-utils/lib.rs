@@ -71,6 +71,7 @@ impl StableStorage for RamStorage {
     }
 }
 
+#[derive(Default, Clone)]
 pub struct SharedRamStorage {
     pub content: Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>,
 }
