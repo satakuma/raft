@@ -8,7 +8,7 @@ use crate::{
 
 pub(crate) struct Candidate {
     ballot_box: BallotBox,
-    election_timer: Timer,
+    _election_timer: Timer,
 }
 
 impl Candidate {
@@ -23,11 +23,11 @@ impl Candidate {
 
         let mut candidate = Candidate {
             ballot_box: BallotBox::new(server.all_servers.len()),
-            election_timer: Timer::new_election_timer(server),
+            _election_timer: Timer::new_election_timer(server),
         };
 
         if candidate.ballot_box.add_vote(Vote::self_vote(server)) == VotingResult::Won {
-            Leader::transition_from_canditate(server).await.into()
+            Leader::transition_from_canditate(server).await
         } else {
             let (last_log_term, last_log_index) = server.log().last_metadata().into();
             server
@@ -78,7 +78,7 @@ impl RaftState for Candidate {
                 // Receive the vote and possibly convert to a leader.
                 let vote = Vote::from_msg(msg.header.source, args.vote_granted);
                 if self.ballot_box.add_vote(vote) == VotingResult::Won {
-                    Some(Leader::transition_from_canditate(server).await.into())
+                    Some(Leader::transition_from_canditate(server).await)
                 } else {
                     None
                 }

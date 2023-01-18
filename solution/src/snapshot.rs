@@ -3,8 +3,7 @@ use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::storage::LogEntryMetadata;
-use crate::{ClientSession, InstallSnapshotArgs, Server};
+use crate::{ClientSession, InstallSnapshotArgs, LogEntryMetadata, Server};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct Snapshot {

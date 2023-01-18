@@ -67,10 +67,6 @@ impl Timer {
             }
         });
     }
-
-    pub(crate) fn stop(&mut self) {
-        self.handle = None;
-    }
 }
 
 #[derive(Clone, Debug)]

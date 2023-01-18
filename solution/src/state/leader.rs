@@ -48,7 +48,7 @@ impl Leader {
             prev_log_index,
             prev_log_term,
             entries,
-            leader_commit: server.commit_index,
+            leader_commit: server.commit_index(),
         };
         server.send(follower, msg.into()).await;
     }
