@@ -14,14 +14,24 @@ pub(crate) struct Follower {
 }
 
 impl Follower {
-    // Creates a passive follower which will not become a candidate.
-    pub(crate) fn observer() -> Follower {
-        Follower {
+    /// Constructs a Follower at Raft server initialization or recovery.
+    /// It will retrieve an unfinished snapshot if there is one.
+    pub(crate) async fn init_recovery(server: &mut Server) -> Follower {
+        let snapshot_recv = snapshot::Receiver::recovery(server).await;
+        let mut follower = Follower {
             leader: None,
-            snapshot_recv: None,
+            snapshot_recv,
             election_timer: None,
             minimum_election_timer: None,
-        }
+        };
+        follower.try_install_snapshot(server).await;
+        follower
+    }
+
+    /// Hook called when the Raft server starts operating.
+    /// Boils down to starting the election timer.
+    pub(crate) fn raft_server_start(&mut self, server: &Server) {
+        self.election_timer = Some(Timer::new_election_timer(server));
     }
 
     pub(crate) fn new(server: &Server) -> Follower {
@@ -67,6 +77,17 @@ impl Follower {
 
         // Reset timers.
         self.reset_timers(server);
+    }
+
+    async fn try_install_snapshot(&mut self, server: &mut Server) {
+        if let Some(recv) = &mut self.snapshot_recv {
+            if recv.is_ready() {
+                recv.install_snapshot(server).await;
+                self.snapshot_recv = None;
+            } else if recv.is_finished() {
+                self.snapshot_recv = None;
+            }
+        }
     }
 }
 
@@ -139,11 +160,14 @@ impl RaftState for Follower {
                 }
                 .into();
 
-                let receiver = self.snapshot_recv.get_or_insert(snapshot::Receiver::new());
-                if receiver.receive_chunk(args) == snapshot::Status::Done {
-                    let snapshot = self.snapshot_recv.take().unwrap().into_snapshot();
-                    server.install_snapshot(snapshot).await;
-                }
+                let recv = if let Some(recv) = self.snapshot_recv.as_mut() {
+                    recv
+                } else {
+                    self.snapshot_recv = Some(snapshot::Receiver::new(server).await);
+                    self.snapshot_recv.as_mut().unwrap()
+                };
+                recv.receive_chunk(args).await;
+                self.try_install_snapshot(server).await;
 
                 server.respond_with(&msg.header, response).await;
             }

@@ -41,8 +41,12 @@ pub(crate) enum ServerState {
 }
 
 impl ServerState {
-    pub(crate) fn initial() -> ServerState {
-        Follower::observer().into()
+    pub(crate) async fn init_recovery(server: &mut Server) -> ServerState {
+        Follower::init_recovery(server).await.into()
+    }
+
+    pub(crate) fn raft_server_start(&mut self, server: &Server) {
+        self.follower_mut().unwrap().raft_server_start(server);
     }
 }
 

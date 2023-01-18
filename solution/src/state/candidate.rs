@@ -12,7 +12,7 @@ pub(crate) struct Candidate {
 }
 
 impl Candidate {
-    async fn new(server: &mut Server) -> ServerState {
+    async fn start_election(server: &mut Server) -> ServerState {
         server
             .pstate
             .update_with(|ps| {
@@ -44,11 +44,11 @@ impl Candidate {
     }
 
     pub(crate) async fn transition_from_follower(server: &mut Server) -> ServerState {
-        Candidate::new(server).await
+        Candidate::start_election(server).await
     }
 
     pub(crate) async fn loop_from_candidate(server: &mut Server) -> ServerState {
-        Candidate::new(server).await
+        Candidate::start_election(server).await
     }
 }
 

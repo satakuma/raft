@@ -1,6 +1,3 @@
-use std::collections::{HashMap, HashSet};
-use std::convert::TryInto;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_channel::unbounded;
@@ -17,7 +14,6 @@ use assignment_3_test_utils::*;
 async fn install_snapshot_with_failing_follower() {
     // given
     let mut system = System::new().await;
-    let leader_id = Uuid::new_v4();
     let follower_id = Uuid::new_v4();
     let spy_id = Uuid::new_v4();
     let processes = vec![follower_id, spy_id];

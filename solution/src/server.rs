@@ -44,15 +44,15 @@ impl Server {
         message_sender: Box<dyn RaftSender>,
     ) -> Server {
         let storage = Storage::new(stable_storage);
-        let mut pstate = Persistent::new(
+        let mut pstate = Persistent::recover_or(
             "raft_persistent_state",
+            &storage,
             PersistentState {
                 current_term: 0,
                 voted_for: None,
                 leader_id: None,
                 log: Log::empty(),
             },
-            &storage,
         )
         .await;
 
@@ -101,6 +101,10 @@ impl Server {
 
     pub(crate) fn log(&self) -> &Log {
         &self.pstate.log
+    }
+
+    pub(crate) fn storage(&self) -> &Storage {
+        &self.storage
     }
 
     pub(crate) fn commit_index(&self) -> usize {

@@ -31,20 +31,36 @@ pub(crate) struct Persistent<T> {
     storage: Storage,
 }
 
+/*
+impl<T> Persistent<T> {
+    pub(crate) fn into_inner(self) -> T {
+        self.value
+    }
+}
+*/
+
 impl<T> Persistent<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
 {
-    pub(crate) async fn new(name: impl AsRef<str>, value: T, storage: &Storage) -> Persistent<T> {
-        match storage.get(name.as_ref()).await {
-            Some(raw) => {
-                let value = bincode::deserialize(&raw).unwrap();
-                Persistent {
-                    value,
-                    name: name.as_ref().to_string(),
-                    storage: storage.clone(),
-                }
+    pub(crate) async fn recover(name: impl AsRef<str>, storage: &Storage) -> Option<Persistent<T>> {
+        storage.get(name.as_ref()).await.map(|raw| {
+            let value = bincode::deserialize(&raw).unwrap();
+            Persistent {
+                value,
+                name: name.as_ref().to_string(),
+                storage: storage.clone(),
             }
+        })
+    }
+
+    pub(crate) async fn recover_or(
+        name: impl AsRef<str>,
+        storage: &Storage,
+        value: T,
+    ) -> Persistent<T> {
+        match Persistent::recover(name.as_ref(), storage).await {
+            Some(result) => result,
             None => {
                 storage
                     .put(name.as_ref(), &bincode::serialize(&value).unwrap())

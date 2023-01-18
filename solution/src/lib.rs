@@ -38,7 +38,7 @@ impl Raft {
         stable_storage: Box<dyn StableStorage>,
         message_sender: Box<dyn RaftSender>,
     ) -> ModuleRef<Self> {
-        let server = Server::new(
+        let mut server = Server::new(
             config,
             first_log_entry_timestamp,
             state_machine,
@@ -47,8 +47,8 @@ impl Raft {
         )
         .await;
         let raft = Raft {
+            state: ServerState::init_recovery(&mut server).await,
             server,
-            state: ServerState::initial(),
         };
 
         let mref = system.register_module(raft).await;
@@ -86,7 +86,7 @@ struct Start;
 impl Handler<Start> for Raft {
     async fn handle(&mut self, self_ref: &ModuleRef<Self>, _msg: Start) {
         self.server.set_self_ref(self_ref.clone());
-        self.state = Follower::new(&self.server).into();
+        self.state.raft_server_start(&self.server);
     }
 }
 

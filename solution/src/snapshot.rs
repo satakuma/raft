@@ -3,7 +3,8 @@ use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::{ClientSession, InstallSnapshotArgs, LogEntryMetadata, Server};
+use crate::domain::*;
+use crate::{LogEntryMetadata, Persistent, Server};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct Snapshot {
@@ -96,30 +97,69 @@ impl Sender {
     }
 }
 
-pub(crate) struct Receiver {
+pub(crate) struct Receiver(Persistent<ReceiverInner>);
+
+#[derive(Serialize, Deserialize)]
+enum ReceiverInner {
+    Pending(PendingState),
+    Ready(Snapshot),
+    Finished,
+}
+
+impl ReceiverInner {
+    fn pending(self) -> PendingState {
+        match self {
+            ReceiverInner::Pending(inner) => inner,
+            _ => panic!("tried to use Receiver after Ready"),
+        }
+    }
+
+    fn pending_mut(&mut self) -> &mut PendingState {
+        match self {
+            ReceiverInner::Pending(inner) => inner,
+            _ => panic!("tried to use Receiver after Ready"),
+        }
+    }
+
+    fn snapshot(self) -> Snapshot {
+        match self {
+            ReceiverInner::Ready(inner) => inner,
+            _ => panic!("tried to a snapshot from not Ready receiver"),
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        matches!(self, ReceiverInner::Ready(_))
+    }
+
+    fn is_finished(&self) -> bool {
+        matches!(self, ReceiverInner::Finished)
+    }
+}
+
+impl Default for ReceiverInner {
+    fn default() -> ReceiverInner {
+        ReceiverInner::Pending(Default::default())
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct PendingState {
     data: Vec<u8>,
     last_log: Option<LogEntryMetadata>,
     last_config: Option<HashSet<Uuid>>,
     client_sessions: Option<HashMap<Uuid, ClientSession>>,
 }
 
-impl Receiver {
-    pub fn new() -> Receiver {
-        Receiver {
-            data: Vec::new(),
-            last_log: None,
-            last_config: None,
-            client_sessions: None,
-        }
-    }
-
-    pub fn receive_chunk(&mut self, args: InstallSnapshotArgs) -> Status {
+impl PendingState {
+    async fn receive_chunk(&mut self, args: InstallSnapshotArgs) -> Status {
         assert_eq!(self.data.len(), args.offset);
 
         self.data.extend_from_slice(&args.data);
         self.last_log = Some((args.last_included_term, args.last_included_index).into());
         self.last_config = self.last_config.take().or(args.last_config);
         self.client_sessions = self.client_sessions.take().or(args.client_sessions);
+
         if args.done {
             Status::Done
         } else {
@@ -127,11 +167,58 @@ impl Receiver {
         }
     }
 
-    pub fn into_snapshot(self) -> Snapshot {
+    fn into_snapshot(self) -> Snapshot {
         Snapshot {
             data: self.data,
             last_included: self.last_log.unwrap(),
         }
+    }
+}
+
+impl Receiver {
+    pub async fn recovery(server: &Server) -> Option<Receiver> {
+        if let Some(inner) = Persistent::recover("snapshot_receiver", server.storage()).await {
+            match &*inner {
+                ReceiverInner::Finished => None,
+                _ => Some(Receiver(inner)),
+            }
+        } else {
+            None
+        }
+    }
+
+    pub async fn new(server: &Server) -> Receiver {
+        let inner =
+            Persistent::recover_or("snapshot_receiver", server.storage(), Default::default()).await;
+        Receiver(inner)
+    }
+
+    pub async fn receive_chunk(&mut self, args: InstallSnapshotArgs) -> Status {
+        let mut guard = self.0.mutate();
+        let result = guard.pending_mut().receive_chunk(args).await;
+        if result == Status::Done {
+            // Some trickery to avoid cloning.
+            let inner = std::mem::replace(&mut *guard, ReceiverInner::Finished);
+            *guard = ReceiverInner::Ready(inner.pending().into_snapshot())
+        }
+        guard.save().await;
+        result
+    }
+
+    pub async fn install_snapshot(&mut self, server: &mut Server) {
+        let mut guard = self.0.mutate();
+        let inner = std::mem::replace(&mut *guard, ReceiverInner::Finished);
+        server.install_snapshot(inner.snapshot()).await;
+        *guard = ReceiverInner::Finished;
+        guard.save().await;
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.0.is_ready()
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.0.is_finished()
     }
 }
 
