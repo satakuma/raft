@@ -1,10 +1,8 @@
 use std::collections::HashSet;
 use uuid::Uuid;
 
-use crate::{
-    ClientRequest, Follower, Leader, RaftMessage, RaftMessageContent, RaftState, RequestVoteArgs,
-    Server, ServerState, Timeout, Timer,
-};
+use crate::domain::*;
+use crate::{Follower, Leader, RaftState, Server, ServerState, Timeout, Timer};
 
 pub(crate) struct Candidate {
     ballot_box: BallotBox,

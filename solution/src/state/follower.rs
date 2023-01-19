@@ -1,10 +1,7 @@
 use uuid::Uuid;
 
-use crate::{
-    snapshot, AppendEntriesResponseArgs, Candidate, ClientRequest, InstallSnapshotResponseArgs,
-    RaftMessage, RaftMessageContent, RaftState, RequestVoteResponseArgs, Server, ServerState,
-    Timeout, Timer,
-};
+use crate::domain::*;
+use crate::{snapshot, Candidate, RaftState, Server, ServerState, Timeout, Timer};
 
 pub(crate) struct Follower {
     leader: Option<Uuid>,

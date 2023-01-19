@@ -26,42 +26,36 @@ impl ClientManager {
         }
     }
 
-    pub(crate) fn is_expired(&mut self, client_id: Uuid, now: SystemTime) -> bool {
+    pub(crate) fn is_expired(&self, client_id: Uuid, now: SystemTime) -> bool {
         if let Some(session) = self.sessions.get(&client_id) {
-            if now.duration_since(session.last_activity).unwrap() < self.expire_period {
-                false
-            } else {
-                self.sessions.remove(&client_id);
-                true
-            }
+            now.duration_since(session.last_activity).unwrap() >= self.expire_period
         } else {
             true
         }
     }
 
     pub(crate) fn command_status(&self, client_id: Uuid, seq_num: u64) -> CommandStatus {
-        if self.channels.get(&client_id).and_then(|c| c.commands.get(&seq_num)).is_some() {
-            CommandStatus::InProgress
-        } else {
-            if let Some(session) = self.sessions.get(&client_id) {
-                if let Some(output) = session.responses.get(&seq_num) {
-                    CommandStatus::Finished(output.clone())
-                } else if seq_num >= session.lowest_sequence_num_without_response {
-                    CommandStatus::New
-                } else {
-                    CommandStatus::Expired
-                }
+        if let Some(session) = self.sessions.get(&client_id) {
+            if let Some(output) = session.responses.get(&seq_num) {
+                CommandStatus::Finished(output.clone())
+            } else if seq_num < session.lowest_sequence_num_without_response {
+                CommandStatus::Discarded
             } else {
-                CommandStatus::Expired
+                CommandStatus::Pending
             }
+        } else {
+            CommandStatus::Pending
         }
     }
 
     pub(crate) fn prepare_register_client(&mut self, client_id: Uuid, channel: ClientSender) {
-        self.channels.insert(client_id, ReplyChannels {
-            commands: HashMap::new(),
-            register: Some(channel),
-        });
+        self.channels.insert(
+            client_id,
+            ReplyChannels {
+                commands: HashMap::new(),
+                register: Some(channel),
+            },
+        );
     }
 
     pub(crate) fn prepare_command(&mut self, client_id: Uuid, seq_num: u64, channel: ClientSender) {
@@ -86,9 +80,16 @@ impl ClientManager {
         }
     }
 
-    pub(crate) async fn command(&mut self, client_id: Uuid, seq_num: u64, output: Vec<u8>) {
+    pub(crate) async fn command(
+        &mut self,
+        client_id: Uuid,
+        seq_num: u64,
+        output: Vec<u8>,
+        now: SystemTime,
+    ) {
         if let Some(session) = self.sessions.get_mut(&client_id) {
             session.responses.insert(seq_num, output.clone());
+            session.last_activity = now;
         }
 
         let channels = self.channels.entry(client_id).or_default();
@@ -107,7 +108,10 @@ impl ClientManager {
 
     pub(crate) async fn expire(&mut self, client_id: Uuid, seq_num: u64) {
         self.sessions.remove(&client_id);
+        self.reply_session_expired(client_id, seq_num).await;
+    }
 
+    pub(crate) async fn reply_session_expired(&mut self, client_id: Uuid, seq_num: u64) {
         let channels = self.channels.entry(client_id).or_default();
         if let Some(channels) = channels.commands.remove(&seq_num) {
             let content = CommandResponseContent::SessionExpired;
@@ -122,20 +126,13 @@ impl ClientManager {
         }
     }
 
-    pub(crate) fn prolong_session(&mut self, client_id: Uuid, now: SystemTime) {
-        if let Some(session) = self.sessions.get_mut(&client_id) {
-            session.last_activity = now;
-        }
-    }
-
     pub(crate) fn prune_outputs(&mut self, client_id: Uuid, lowest_seq_num: u64) {
         if let Some(session) = self.sessions.get_mut(&client_id) {
             if session.lowest_sequence_num_without_response < lowest_seq_num {
-                println!("pruning responses for {:?} lower than {:?}", client_id, lowest_seq_num);
-                println!(" before pruning: {:?}", session.responses);
-                session.responses.retain(|&seq_num, _| seq_num >= lowest_seq_num);
+                session
+                    .responses
+                    .retain(|&seq_num, _| seq_num >= lowest_seq_num);
                 session.lowest_sequence_num_without_response = lowest_seq_num;
-                println!(" after pruning: {:?}", session.responses);
             }
         }
     }
@@ -143,8 +140,7 @@ impl ClientManager {
 
 #[derive(Clone, Debug)]
 pub(crate) enum CommandStatus {
-    New,
-    InProgress,
+    Pending,
     Finished(Vec<u8>),
-    Expired,
+    Discarded,
 }

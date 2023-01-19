@@ -31,14 +31,6 @@ pub(crate) struct Persistent<T> {
     storage: Storage,
 }
 
-/*
-impl<T> Persistent<T> {
-    pub(crate) fn into_inner(self) -> T {
-        self.value
-    }
-}
-*/
-
 impl<T> Persistent<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,

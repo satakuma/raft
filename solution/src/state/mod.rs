@@ -13,7 +13,8 @@ pub(crate) use candidate::Candidate;
 mod leader;
 pub(crate) use leader::Leader;
 
-use crate::{time::Timeout, ClientRequest, ClientRequestContent, RaftMessage, Server};
+use crate::domain::*;
+use crate::{Server, Timeout};
 
 #[async_trait::async_trait]
 pub(crate) trait RaftState {

@@ -6,7 +6,7 @@ use std::{
 use uuid::Uuid;
 
 use crate::domain::*;
-use crate::{snapshot, CommandStatus, Follower, RaftState, Server, ServerState, Timeout, Timer};
+use crate::{snapshot, Follower, RaftState, Server, ServerState, Timeout, Timer};
 
 pub(crate) struct Leader {
     next_index: HashMap<Uuid, usize>,
@@ -214,7 +214,9 @@ impl RaftState for Leader {
                     .await;
 
                 let client_id = server.get_client_id(server.log().last_index());
-                server.client_manager.prepare_register_client(client_id, req.reply_to);
+                server
+                    .client_manager
+                    .prepare_register_client(client_id, req.reply_to);
                 self.replicate_log(server).await;
                 self.advance_commit_index(server).await;
             }
@@ -224,51 +226,28 @@ impl RaftState for Leader {
                 sequence_num,
                 lowest_sequence_num_without_response,
             } => {
-                match server.client_manager.command_status(client_id, sequence_num) {
-                    CommandStatus::New => {
-                        let log_entry = LogEntry {
-                            term: server.pstate.current_term,
-                            timestamp: SystemTime::now(),
-                            content: LogEntryContent::Command {
-                                data: command,
-                                client_id,
-                                sequence_num,
-                                lowest_sequence_num_without_response,
-                            },
-                        };
-                        server
-                            .pstate
-                            .update_with(|ps| {
-                                ps.log.push(log_entry);
-                            })
-                            .await;
+                let log_entry = LogEntry {
+                    term: server.pstate.current_term,
+                    timestamp: SystemTime::now(),
+                    content: LogEntryContent::Command {
+                        data: command,
+                        client_id,
+                        sequence_num,
+                        lowest_sequence_num_without_response,
+                    },
+                };
+                server
+                    .pstate
+                    .update_with(|ps| {
+                        ps.log.push(log_entry);
+                    })
+                    .await;
 
-                        server.client_manager.prepare_command(client_id, sequence_num, req.reply_to);
-                        self.replicate_log(server).await;
-                        self.advance_commit_index(server).await;
-                    }
-                    CommandStatus::InProgress => {
-                        server.client_manager.prepare_command(client_id, sequence_num, req.reply_to);
-                    }
-                    CommandStatus::Finished(output) => {
-                        let content = CommandResponseContent::CommandApplied { output };
-                        let response = CommandResponseArgs {
-                            client_id,
-                            sequence_num,
-                            content,
-                        };
-                        let _ = req.reply_to.send(response.into()).await;
-                    }
-                    CommandStatus::Expired => {
-                        let content = CommandResponseContent::SessionExpired;
-                        let response = CommandResponseArgs {
-                            client_id,
-                            sequence_num,
-                            content,
-                        };
-                        let _ = req.reply_to.send(response.into()).await;
-                    }
-                }
+                server
+                    .client_manager
+                    .prepare_command(client_id, sequence_num, req.reply_to);
+                self.replicate_log(server).await;
+                self.advance_commit_index(server).await;
             }
             ClientRequestContent::AddServer { .. } => todo!(),
             ClientRequestContent::RemoveServer { .. } => todo!(),

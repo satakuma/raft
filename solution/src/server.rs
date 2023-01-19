@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::time::SystemTime;
 
 use crate::domain::*;
-use crate::{ClientManager, ClientSender, Log, Persistent, Raft, Snapshot, Storage};
+use crate::{ClientManager, ClientSender, CommandStatus, Log, Persistent, Raft, Snapshot, Storage};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct PersistentState {
@@ -134,24 +134,35 @@ impl Server {
                 sequence_num,
                 lowest_sequence_num_without_response,
             } => {
-                println!("[{:?}] applying command for {:?} num {:?}", self.config.self_id, client_id, sequence_num);
                 if !self.client_manager.is_expired(*client_id, entry.timestamp) {
-                    self.client_manager.prolong_session(*client_id, entry.timestamp);
-
-                    let output = self.state_machine.apply(data).await;
-                    self.client_manager.command(*client_id, *sequence_num, output.clone()).await;
-
-                    self
-                    .client_manager
-                    .prune_outputs(*client_id, *lowest_sequence_num_without_response);
+                    let output = match self
+                        .client_manager
+                        .command_status(*client_id, *sequence_num)
+                    {
+                        CommandStatus::Pending => self.state_machine.apply(data).await,
+                        CommandStatus::Finished(output) => output,
+                        CommandStatus::Discarded => {
+                            self.client_manager
+                                .reply_session_expired(*client_id, *sequence_num)
+                                .await;
+                            return;
+                        }
+                    };
+                    self.client_manager
+                        .command(*client_id, *sequence_num, output, entry.timestamp)
+                        .await;
+                    self.client_manager
+                        .prune_outputs(*client_id, *lowest_sequence_num_without_response);
                 } else {
                     self.client_manager.expire(*client_id, *sequence_num).await;
-                };
+                }
             }
             LogEntryContent::Configuration { .. } => {}
             LogEntryContent::RegisterClient => {
                 let client_id = self.get_client_id(index);
-                self.client_manager.register_client(client_id, entry.timestamp).await;
+                self.client_manager
+                    .register_client(client_id, entry.timestamp)
+                    .await;
             }
             LogEntryContent::NoOp => {}
         }
