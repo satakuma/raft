@@ -1,16 +1,13 @@
-use async_channel::Sender;
 use executor::ModuleRef;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use std::cmp::{max, min};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::SystemTime;
 
 use crate::domain::*;
-use crate::{Log, Persistent, Raft, Snapshot, Storage};
-
-type ClientSender = Sender<ClientRequestResponse>;
+use crate::{ClientManager, ClientSender, Log, Persistent, Raft, Snapshot, Storage};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct PersistentState {
@@ -30,7 +27,7 @@ pub(crate) struct Server {
     last_applied: usize,
 
     pub all_servers: HashSet<Uuid>,
-    pub clients: HashMap<Uuid, ClientSender>,
+    pub client_manager: ClientManager,
     pub pstate: Persistent<PersistentState>,
     pub config: ServerConfig,
 }
@@ -82,7 +79,7 @@ impl Server {
             state_machine,
             sender: message_sender,
             all_servers: config.servers.clone(),
-            clients: HashMap::new(),
+            client_manager: ClientManager::new(config.session_expiration),
             pstate,
             config,
             commit_index: last_applied,
@@ -135,28 +132,26 @@ impl Server {
                 data,
                 client_id,
                 sequence_num,
-                lowest_sequence_num_without_response: _,
+                lowest_sequence_num_without_response,
             } => {
-                let output = self.state_machine.apply(data).await;
-                if let Some(sender) = self.clients.get(client_id) {
-                    // TODO sequence_num?
-                    let response = CommandResponseArgs {
-                        client_id: *client_id,
-                        sequence_num: *sequence_num,
-                        content: CommandResponseContent::CommandApplied { output },
-                    };
-                    let _ = sender.send(response.into()).await;
-                }
+                println!("[{:?}] applying command for {:?} num {:?}", self.config.self_id, client_id, sequence_num);
+                if !self.client_manager.is_expired(*client_id, entry.timestamp) {
+                    self.client_manager.prolong_session(*client_id, entry.timestamp);
+
+                    let output = self.state_machine.apply(data).await;
+                    self.client_manager.command(*client_id, *sequence_num, output.clone()).await;
+
+                    self
+                    .client_manager
+                    .prune_outputs(*client_id, *lowest_sequence_num_without_response);
+                } else {
+                    self.client_manager.expire(*client_id, *sequence_num).await;
+                };
             }
             LogEntryContent::Configuration { .. } => {}
             LogEntryContent::RegisterClient => {
                 let client_id = self.get_client_id(index);
-                if let Some(sender) = self.clients.get(&client_id) {
-                    let response = RegisterClientResponseArgs {
-                        content: RegisterClientResponseContent::ClientRegistered { client_id },
-                    };
-                    let _ = sender.send(response.into()).await;
-                }
+                self.client_manager.register_client(client_id, entry.timestamp).await;
             }
             LogEntryContent::NoOp => {}
         }

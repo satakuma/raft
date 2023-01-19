@@ -1,3 +1,4 @@
+use async_channel::Sender;
 use executor::{Handler, ModuleRef, System};
 use std::time::SystemTime;
 
@@ -10,6 +11,9 @@ pub(crate) use server::Server;
 mod state;
 pub(crate) use state::{Candidate, Follower, Leader, RaftState, ServerState};
 
+mod client_manager;
+pub(crate) use client_manager::{ClientManager, CommandStatus};
+
 mod log;
 pub(crate) use crate::log::{Log, LogEntryMetadata};
 
@@ -21,6 +25,8 @@ pub(crate) use storage::{Persistent, Storage};
 
 mod time;
 pub(crate) use time::{Timeout, Timer};
+
+pub(crate) type ClientSender = Sender<ClientRequestResponse>;
 
 pub struct Raft {
     server: Server,
