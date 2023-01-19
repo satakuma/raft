@@ -3,11 +3,13 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use std::cmp::{max, min};
-use std::collections::HashSet;
 use std::time::SystemTime;
 
 use crate::domain::*;
-use crate::{ClientManager, ClientSender, CommandStatus, Log, Persistent, Raft, Snapshot, Storage};
+use crate::{
+    ClientManager, ClientSender, CommandStatus, DynamicConfig, Log, Persistent, Raft, Snapshot,
+    Storage,
+};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct PersistentState {
@@ -25,10 +27,9 @@ pub(crate) struct Server {
     commit_index: usize,
     last_applied: usize,
 
-    pub all_servers: HashSet<Uuid>,
     pub client_manager: ClientManager,
     pub pstate: Persistent<PersistentState>,
-    pub config: ServerConfig,
+    pub config: DynamicConfig,
 }
 
 impl Server {
@@ -71,12 +72,13 @@ impl Server {
             state_machine.initialize(data).await;
         }
 
+        let config = DynamicConfig::from_static_config(config);
+
         Server {
             self_ref: None,
             storage,
             state_machine,
             sender: message_sender,
-            all_servers: config.servers.clone(),
             client_manager: ClientManager::new(config.session_expiration),
             pstate,
             config,
@@ -168,7 +170,7 @@ impl Server {
 
     pub(crate) async fn install_snapshot(&mut self, snapshot: Snapshot) {
         // Initialize config and client sessions.
-        self.all_servers = snapshot.last_config;
+        self.config.initialize(&snapshot.last_config);
         self.client_manager.initialize(&snapshot.client_sessions);
 
         // Initialize state machine and related variables.
@@ -217,7 +219,7 @@ impl Server {
     }
 
     pub(crate) async fn broadcast(&self, msg_content: RaftMessageContent) {
-        for server_id in &self.all_servers {
+        for server_id in self.config.servers() {
             if *server_id != self.config.self_id {
                 self.send(*server_id, msg_content.clone()).await;
             }

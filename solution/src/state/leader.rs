@@ -64,7 +64,7 @@ impl Leader {
             // Otherwise send our snapshot to this slow follower.
             let snapshot = Snapshot {
                 log: server.log().snapshot().unwrap().clone(),
-                last_config: server.all_servers.clone(),
+                last_config: server.config.servers().clone(),
                 client_sessions: server.client_manager.sessions().clone(),
             };
             let sender =
@@ -75,7 +75,7 @@ impl Leader {
     }
 
     async fn replicate_log(&mut self, server: &mut Server) {
-        for server_id in &server.all_servers {
+        for server_id in server.config.servers() {
             if *server_id != server.config.self_id {
                 self.replicate_log_with_follower(server, *server_id).await;
             }
@@ -88,7 +88,7 @@ impl Leader {
 
     async fn advance_commit_index(&mut self, server: &mut Server) {
         // Minimum number of other servers for a majority (we don't count ourself here).
-        let num_majority = server.all_servers.len() / 2;
+        let num_majority = server.config.servers().len() / 2;
         if num_majority > 0 {
             let mut indexes = self.match_index.values().collect::<Vec<_>>();
             let majority_index = indexes
@@ -112,14 +112,16 @@ impl Leader {
         guard.save().await;
 
         let next_index = server
-            .all_servers
+            .config
+            .servers()
             .iter()
             .cloned()
             .filter(|id| *id != server.config.self_id)
             .map(|s| (s, server.log().last_index()))
             .collect();
         let match_index = server
-            .all_servers
+            .config
+            .servers()
             .iter()
             .cloned()
             .filter(|id| *id != server.config.self_id)
@@ -264,7 +266,7 @@ impl RaftState for Leader {
                 None
             }
             Timeout::HeartbeatResponse => {
-                if self.heartbeat_responders.len() <= server.all_servers.len() / 2 {
+                if self.heartbeat_responders.len() <= server.config.servers().len() / 2 {
                     Some(Follower::new(server).into())
                 } else {
                     self.heartbeat_response_timer.reset();

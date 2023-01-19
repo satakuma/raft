@@ -20,7 +20,7 @@ impl Candidate {
             .await;
 
         let mut candidate = Candidate {
-            ballot_box: BallotBox::new(server.all_servers.len()),
+            ballot_box: BallotBox::new(server.config.servers().len()),
             _election_timer: Timer::new_election_timer(server),
         };
 

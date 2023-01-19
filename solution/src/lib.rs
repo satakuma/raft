@@ -2,23 +2,26 @@ use async_channel::Sender;
 use executor::{Handler, ModuleRef, System};
 use std::time::SystemTime;
 
-mod domain;
-pub use domain::*;
-
-mod server;
-pub(crate) use server::Server;
-
-mod state;
-pub(crate) use state::{Candidate, Follower, Leader, RaftState, ServerState};
-
 mod client_manager;
 pub(crate) use client_manager::{ClientManager, CommandStatus};
+
+mod cluster;
+pub(crate) use cluster::DynamicConfig;
+
+mod domain;
+pub use domain::*;
 
 mod log;
 pub(crate) use crate::log::{Log, LogEntryMetadata, LogSnapshot};
 
+mod server;
+pub(crate) use server::Server;
+
 pub(crate) mod snapshot;
 pub(crate) use snapshot::Snapshot;
+
+mod state;
+pub(crate) use state::{Candidate, Follower, Leader, RaftState, ServerState};
 
 mod storage;
 pub(crate) use storage::{Persistent, Storage};
