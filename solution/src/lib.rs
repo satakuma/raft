@@ -15,7 +15,7 @@ mod client_manager;
 pub(crate) use client_manager::{ClientManager, CommandStatus};
 
 mod log;
-pub(crate) use crate::log::{Log, LogEntryMetadata};
+pub(crate) use crate::log::{Log, LogEntryMetadata, LogSnapshot};
 
 pub(crate) mod snapshot;
 pub(crate) use snapshot::Snapshot;

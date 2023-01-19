@@ -93,7 +93,7 @@ impl RaftState for ServerState {
 
     async fn handle_client_req(&mut self, server: &mut Server, req: ClientRequest) {
         if let ClientRequestContent::Snapshot = &req.content {
-            server.take_snapshot(req.reply_to).await;
+            server.take_log_snapshot(req.reply_to).await;
         } else {
             match self {
                 ServerState::Follower(inner) => inner.handle_client_req(server, req).await,

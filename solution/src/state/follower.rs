@@ -56,7 +56,6 @@ impl Follower {
             .update_with(|ps| {
                 ps.current_term = term;
                 ps.voted_for = None;
-                ps.leader_id = None;
             })
             .await;
         Follower::new(server).into()
@@ -69,10 +68,8 @@ impl Follower {
     }
 
     fn heartbeat_received(&mut self, server: &Server, source: Uuid) {
-        // Follow the leader.
+        // Follow the leader and reset timers.
         self.leader = Some(source);
-
-        // Reset timers.
         self.reset_timers(server);
     }
 

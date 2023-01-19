@@ -13,7 +13,6 @@ use crate::{ClientManager, ClientSender, CommandStatus, Log, Persistent, Raft, S
 pub(crate) struct PersistentState {
     pub current_term: u64,
     pub voted_for: Option<Uuid>,
-    pub leader_id: Option<Uuid>,
     pub log: Log,
 }
 
@@ -47,7 +46,6 @@ impl Server {
             PersistentState {
                 current_term: 0,
                 voted_for: None,
-                leader_id: None,
                 log: Log::empty(),
             },
         )
@@ -169,18 +167,22 @@ impl Server {
     }
 
     pub(crate) async fn install_snapshot(&mut self, snapshot: Snapshot) {
-        self.state_machine.initialize(&snapshot.data).await;
+        // Initialize config and client sessions.
+        self.all_servers = snapshot.last_config;
+        self.client_manager.initialize(&snapshot.client_sessions);
 
-        assert!(self.last_applied <= snapshot.last_included.index);
-        self.last_applied = snapshot.last_included.index;
+        // Initialize state machine and related variables.
+        self.state_machine.initialize(&snapshot.log.data).await;
+        self.last_applied = snapshot.log.last_included.index;
         self.commit_index = max(self.commit_index, self.last_applied);
 
+        // Write the log snapshot to storage.
         let mut guard = self.pstate.mutate();
-        guard.log.apply_snapshot(snapshot);
+        guard.log.apply_snapshot(snapshot.log);
         guard.save().await;
     }
 
-    pub(crate) async fn take_snapshot(&mut self, client_sender: ClientSender) {
+    pub(crate) async fn take_log_snapshot(&mut self, client_sender: ClientSender) {
         let data = self.state_machine.serialize().await;
 
         let mut guard = self.pstate.mutate();

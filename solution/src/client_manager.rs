@@ -26,6 +26,14 @@ impl ClientManager {
         }
     }
 
+    pub(crate) fn initialize(&mut self, sessions: &HashMap<Uuid, ClientSession>) {
+        self.sessions = sessions.clone();
+    }
+
+    pub(crate) fn sessions(&self) -> &HashMap<Uuid, ClientSession> {
+        &self.sessions
+    }
+
     pub(crate) fn is_expired(&self, client_id: Uuid, now: SystemTime) -> bool {
         if let Some(session) = self.sessions.get(&client_id) {
             now.duration_since(session.last_activity).unwrap() >= self.expire_period

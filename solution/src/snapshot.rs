@@ -4,24 +4,13 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::domain::*;
-use crate::{LogEntryMetadata, Persistent, Server};
+use crate::{LogEntryMetadata, LogSnapshot, Persistent, Server};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct Snapshot {
-    pub data: Vec<u8>,
-    pub last_included: LogEntryMetadata,
-}
-
-impl Snapshot {
-    pub fn new(data: Vec<u8>, last_included: LogEntryMetadata) -> Snapshot {
-        Snapshot {
-            data,
-            last_included,
-        }
-    }
-    pub fn size(&self) -> usize {
-        self.data.len()
-    }
+    pub log: LogSnapshot,
+    pub last_config: HashSet<Uuid>,
+    pub client_sessions: HashMap<Uuid, ClientSession>,
 }
 
 pub(crate) struct Sender {
@@ -43,17 +32,20 @@ impl Sender {
 
     pub async fn send_chunk(&self, server: &Server) {
         let chunk_size = self.get_chunk_size();
-        let chunk = self.snapshot.data[self.offset..self.offset + chunk_size].to_vec();
+        let chunk = self.snapshot.log.data[self.offset..self.offset + chunk_size].to_vec();
 
-        let last_log = self.snapshot.last_included;
+        let last_log = self.snapshot.log.last_included;
         let (last_config, client_sessions) = if self.offset == 0 {
-            (Some(server.all_servers.clone()), None)
+            (
+                Some(self.snapshot.last_config.clone()),
+                Some(self.snapshot.client_sessions.clone()),
+            )
         } else {
             (None, None)
         };
 
         let new_offset = self.offset + chunk_size;
-        let done = new_offset == self.snapshot.size();
+        let done = new_offset == self.snapshot.log.size();
         server
             .send(
                 self.follower,
@@ -78,7 +70,7 @@ impl Sender {
             let chunk_size = self.get_chunk_size();
             self.offset += chunk_size;
 
-            if self.offset == self.snapshot.size() {
+            if self.offset == self.snapshot.log.size() {
                 Status::Done
             } else {
                 Status::Pending
@@ -89,11 +81,11 @@ impl Sender {
     }
 
     pub fn last_included(&self) -> LogEntryMetadata {
-        self.snapshot.last_included
+        self.snapshot.log.last_included
     }
 
     fn get_chunk_size(&self) -> usize {
-        min(self.snapshot.size() - self.offset, self.max_chunk_size)
+        min(self.snapshot.log.size() - self.offset, self.max_chunk_size)
     }
 }
 
@@ -169,8 +161,12 @@ impl PendingState {
 
     fn into_snapshot(self) -> Snapshot {
         Snapshot {
-            data: self.data,
-            last_included: self.last_log.unwrap(),
+            log: LogSnapshot {
+                data: self.data,
+                last_included: self.last_log.unwrap(),
+            },
+            last_config: self.last_config.unwrap(),
+            client_sessions: self.client_sessions.unwrap(),
         }
     }
 }

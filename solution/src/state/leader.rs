@@ -6,7 +6,7 @@ use std::{
 use uuid::Uuid;
 
 use crate::domain::*;
-use crate::{snapshot, Follower, RaftState, Server, ServerState, Timeout, Timer};
+use crate::{snapshot, Follower, RaftState, Server, ServerState, Snapshot, Timeout, Timer};
 
 pub(crate) struct Leader {
     next_index: HashMap<Uuid, usize>,
@@ -62,11 +62,13 @@ impl Leader {
             self.send_append_entries_to_follower(server, follower).await;
         } else {
             // Otherwise send our snapshot to this slow follower.
-            let sender = snapshot::Sender::new(
-                server.log().snapshot().unwrap().clone(),
-                server.config.snapshot_chunk_size,
-                follower,
-            );
+            let snapshot = Snapshot {
+                log: server.log().snapshot().unwrap().clone(),
+                last_config: server.all_servers.clone(),
+                client_sessions: server.client_manager.sessions().clone(),
+            };
+            let sender =
+                snapshot::Sender::new(snapshot, server.config.snapshot_chunk_size, follower);
             sender.send_chunk(server).await;
             self.snapshot_senders.insert(follower, sender);
         }
@@ -101,7 +103,6 @@ impl Leader {
     pub(crate) async fn transition_from_canditate(server: &mut Server) -> ServerState {
         let mut guard = server.pstate.mutate();
         guard.voted_for = Some(server.config.self_id);
-        guard.leader_id = Some(server.config.self_id);
         let noop_entry = LogEntry {
             term: guard.current_term,
             timestamp: SystemTime::now(),
@@ -140,7 +141,7 @@ impl Leader {
 #[async_trait::async_trait]
 impl RaftState for Leader {
     fn ignore_raft_msg(&self, _server: &Server, msg: &RaftMessage) -> bool {
-        // We filter out RequestVote messages since we are the leader.
+        // We filter out RequestVote messages since we are the leader in this term.
         matches!(msg.content, RaftMessageContent::RequestVote(_))
     }
 

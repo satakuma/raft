@@ -1,4 +1,7 @@
-use std::time::{Duration, SystemTime};
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime},
+};
 
 use async_channel::unbounded;
 use ntest::timeout;
@@ -43,7 +46,7 @@ async fn install_snapshot_with_failing_follower() {
             content: RaftMessageContent::InstallSnapshot(InstallSnapshotArgs {
                 offset: 0,
                 data: vec![0, 1, 2, 3],
-                client_sessions: None,
+                client_sessions: Some(HashMap::new()),
                 last_config: Some(processes.clone().into_iter().collect()),
                 last_included_index: 9,
                 last_included_term: 2,

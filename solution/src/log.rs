@@ -1,29 +1,11 @@
-use crate::{LogEntry, Snapshot};
-
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
-pub(crate) struct LogEntryMetadata {
-    pub term: u64,
-    pub index: usize,
-}
-
-impl From<(u64, usize)> for LogEntryMetadata {
-    fn from((term, index): (u64, usize)) -> Self {
-        LogEntryMetadata { term, index }
-    }
-}
-
-impl From<LogEntryMetadata> for (u64, usize) {
-    fn from(md: LogEntryMetadata) -> Self {
-        (md.term, md.index)
-    }
-}
+use crate::domain::*;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct Log {
-    snapshot: Option<Snapshot>,
+    snapshot: Option<LogSnapshot>,
     entries: Vec<LogEntry>,
 }
 
@@ -61,7 +43,7 @@ impl Log {
         self.entries.truncate(len - self.snapshot_len());
     }
 
-    pub fn snapshot(&self) -> Option<&Snapshot> {
+    pub fn snapshot(&self) -> Option<&LogSnapshot> {
         self.snapshot.as_ref()
     }
 
@@ -72,7 +54,7 @@ impl Log {
 
     /// Returns number of bytes of the snapshot
     pub fn snapshot_size(&self) -> usize {
-        self.snapshot.as_ref().map_or(0, Snapshot::size)
+        self.snapshot.as_ref().map_or(0, LogSnapshot::size)
     }
 
     /// Returns reference to the snapshot data.
@@ -151,7 +133,7 @@ impl Log {
         true
     }
 
-    pub fn apply_snapshot(&mut self, snapshot: Snapshot) -> usize {
+    pub fn apply_snapshot(&mut self, snapshot: LogSnapshot) -> usize {
         let num_snapshotted_entries = snapshot.last_included.index + 1 - self.snapshot_len();
         let max_index = min(num_snapshotted_entries, self.entries.len());
         self.entries.drain(..max_index);
@@ -166,11 +148,44 @@ impl Log {
             return 0;
         }
 
-        let last_included_md = match self.get_metadata(last_index) {
+        let last_included = match self.get_metadata(last_index) {
             Some(md) => md,
             None => return 0,
         };
 
-        self.apply_snapshot(Snapshot::new(data, last_included_md))
+        self.apply_snapshot(LogSnapshot {
+            data,
+            last_included,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub(crate) struct LogSnapshot {
+    pub data: Vec<u8>,
+    pub last_included: LogEntryMetadata,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
+pub(crate) struct LogEntryMetadata {
+    pub term: u64,
+    pub index: usize,
+}
+
+impl LogSnapshot {
+    pub fn size(&self) -> usize {
+        self.data.len()
+    }
+}
+
+impl From<(u64, usize)> for LogEntryMetadata {
+    fn from((term, index): (u64, usize)) -> Self {
+        LogEntryMetadata { term, index }
+    }
+}
+
+impl From<LogEntryMetadata> for (u64, usize) {
+    fn from(md: LogEntryMetadata) -> Self {
+        (md.term, md.index)
     }
 }
