@@ -157,10 +157,6 @@ impl Server {
                 }
             }
             LogEntryContent::Configuration { servers } => {
-                println!(
-                    "[{:?}] applying new config: {:?}",
-                    self.config.self_id, servers
-                );
                 self.config.servers = servers.clone();
             }
             LogEntryContent::RegisterClient => {

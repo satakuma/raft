@@ -39,6 +39,16 @@ impl Timer {
         Timer::new(server.self_ref(), dur, Tick::ElectionMinimum)
     }
 
+    pub(crate) fn new_catch_up_round_timer(server: &Server) -> Timer {
+        let dur = rand::thread_rng().gen_range(server.config.election_timeout_range.clone());
+        Timer::new(server.self_ref(), dur, Tick::CatchUpRound)
+    }
+
+    pub(crate) fn new_max_catch_up_round_timer(server: &Server) -> Timer {
+        let dur = 2 * *server.config.election_timeout_range.end();
+        Timer::new(server.self_ref(), dur, Tick::CatchUpTimeout)
+    }
+
     pub(crate) fn new_heartbeat_timer(server: &Server) -> Timer {
         Timer::new(
             server.self_ref(),
@@ -75,4 +85,6 @@ pub(crate) enum Tick {
     ElectionMinimum,
     Heartbeat,
     HeartbeatResponse,
+    CatchUpRound,
+    CatchUpTimeout,
 }

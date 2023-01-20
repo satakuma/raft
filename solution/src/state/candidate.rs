@@ -11,7 +11,6 @@ pub(crate) struct Candidate {
 
 impl Candidate {
     async fn start_election(server: &mut Server) -> ServerState {
-        println!("[{:?}] starting election", server.config.self_id);
         server
             .pstate
             .update_with(|ps| {

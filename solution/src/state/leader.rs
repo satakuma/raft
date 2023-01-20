@@ -70,7 +70,6 @@ impl Leader {
             entries,
             leader_commit: server.commit_index(),
         };
-        //println!("sending append entries to [{:?}] : {:?}", follower, msg);
         server.send(follower, msg.into()).await;
     }
 
@@ -188,8 +187,16 @@ impl Leader {
         };
     }
 
+    fn acknowledge_response(&mut self, source: Uuid) {
+        self.heartbeat_responders.insert(source);
+        if let Some(chg) = &mut self.cluster_change {
+            if let ChangeStatus::CatchingUp { max_timer, .. } = &mut chg.status {
+                max_timer.reset();
+            }
+        }
+    }
+
     pub(crate) async fn transition_from_canditate(server: &mut Server) -> ServerState {
-        println!("[{:?}] won election", server.config.self_id);
         let mut guard = server.pstate.mutate();
         guard.voted_for = Some(server.config.self_id);
         let noop_entry = LogEntry {
@@ -216,7 +223,6 @@ impl Leader {
 
     fn maybe_step_down(&self) -> Option<ServerState> {
         if self.stepping_down {
-            println!("Stepping down");
             Some(Follower::new_observer().into())
         } else {
             None
@@ -241,7 +247,7 @@ impl RaftState for Leader {
                 let source = msg.header.source;
                 let last_log_index = args.last_verified_log_index;
 
-                self.heartbeat_responders.insert(source);
+                self.acknowledge_response(source);
 
                 if args.success {
                     self.match_index.insert(source, last_log_index);
@@ -261,7 +267,7 @@ impl RaftState for Leader {
             }
             RaftMessageContent::InstallSnapshotResponse(args) => {
                 let follower = msg.header.source;
-                self.heartbeat_responders.insert(follower);
+                self.acknowledge_response(follower);
 
                 if let Some(sender) = self.snapshot_senders.get_mut(&follower) {
                     if sender.last_included().index == args.last_included_index {
@@ -365,8 +371,15 @@ impl RaftState for Leader {
                     success_response,
                     sender: req.reply_to,
                     new_config,
-                    status: ChangeStatus::AwaitingCurrentTerm, //TODO
+                    status: ChangeStatus::CatchingUp {
+                        new_server,
+                        round: 0,
+                        round_timer: Timer::new_catch_up_round_timer(server),
+                        max_timer: Timer::new_max_catch_up_round_timer(server),
+                    },
                 });
+                self.next_index.insert(new_server, 1);
+                self.match_index.insert(new_server, 0);
             }
             ClientRequestContent::RemoveServer { old_server } => {
                 if self.cluster_change.is_some() {
@@ -431,6 +444,38 @@ impl RaftState for Leader {
                     self.heartbeat_responders = [server.config.self_id].into();
                 }
             }
+            Tick::CatchUpRound => {
+                if let Some(chg) = &mut self.cluster_change {
+                    if let ChangeStatus::CatchingUp {
+                        new_server,
+                        round,
+                        round_timer,
+                        ..
+                    } = &mut chg.status
+                    {
+                        *round += 1;
+                        if *round >= server.config.catch_up_rounds
+                            || self.next_index[new_server] > server.log().last_index()
+                        {
+                            chg.status = ChangeStatus::AwaitingCurrentTerm;
+                        } else {
+                            round_timer.reset();
+                        }
+                    }
+                }
+            }
+            Tick::CatchUpTimeout => {
+                if let Some(chg) = &mut self.cluster_change {
+                    if let ChangeStatus::CatchingUp { new_server, .. } = chg.status {
+                        let response = AddServerResponseArgs {
+                            new_server,
+                            content: AddServerResponseContent::Timeout,
+                        };
+                        let _ = chg.sender.send(response.into()).await;
+                        self.cluster_change = None;
+                    }
+                }
+            }
             _ => {}
         };
         None
@@ -444,11 +489,15 @@ struct Change {
     status: ChangeStatus,
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum ChangeStatus {
-    CatchingUp,
+    CatchingUp {
+        new_server: Uuid,
+        round: u64,
+        round_timer: Timer,
+        max_timer: Timer,
+    },
     AwaitingCurrentTerm,
     Commiting {
-        index: usize, // waiting for this entry
+        index: usize,
     },
 }

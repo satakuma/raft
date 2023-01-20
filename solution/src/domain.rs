@@ -129,7 +129,7 @@ pub enum AddServerResponseContent {
     /// The server specified in the request is already in the cluster.
     AlreadyPresent,
     /// The added server timed out in the catch up phase.
-    Tick,
+    Timeout,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -33,13 +33,13 @@ async fn one_server_left_error() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     leader
-    .send(ClientRequest {
-        reply_to: result_sender.clone(),
-        content: ClientRequestContent::RemoveServer {
-            old_server: leader_id,
-        },
-    })
-    .await;
+        .send(ClientRequest {
+            reply_to: result_sender.clone(),
+            content: ClientRequestContent::RemoveServer {
+                old_server: leader_id,
+            },
+        })
+        .await;
     let remove_result = result_receiver.recv().await.unwrap();
 
     assert_eq!(
@@ -88,13 +88,13 @@ async fn leader_steps_down() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     leader
-    .send(ClientRequest {
-        reply_to: result_sender.clone(),
-        content: ClientRequestContent::RemoveServer {
-            old_server: leader_id,
-        },
-    })
-    .await;
+        .send(ClientRequest {
+            reply_to: result_sender.clone(),
+            content: ClientRequestContent::RemoveServer {
+                old_server: leader_id,
+            },
+        })
+        .await;
 
     let remove_result = result_receiver.recv().await.unwrap();
     assert_eq!(
@@ -107,12 +107,12 @@ async fn leader_steps_down() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    follower    
-    .send(ClientRequest {
-        reply_to: result_sender.clone(),
-        content: ClientRequestContent::RegisterClient,
-    })
-    .await;
+    follower
+        .send(ClientRequest {
+            reply_to: result_sender.clone(),
+            content: ClientRequestContent::RegisterClient,
+        })
+        .await;
 
     let register_result = result_receiver.recv().await.unwrap();
     assert!(matches!(
