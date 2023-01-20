@@ -5,9 +5,6 @@ use std::time::SystemTime;
 mod client_manager;
 pub(crate) use client_manager::{ClientManager, CommandStatus};
 
-mod cluster;
-pub(crate) use cluster::DynamicConfig;
-
 mod domain;
 pub use domain::*;
 
@@ -27,7 +24,7 @@ mod storage;
 pub(crate) use storage::{Persistent, Storage};
 
 mod time;
-pub(crate) use time::{Timeout, Timer};
+pub(crate) use time::{Tick, Timer};
 
 pub(crate) type ClientSender = Sender<ClientRequestResponse>;
 
@@ -76,10 +73,13 @@ impl Raft {
     }
 
     async fn handle_client_req(&mut self, req: ClientRequest) {
-        self.state.handle_client_req(&mut self.server, req).await;
+        let transition = self.state.handle_client_req(&mut self.server, req).await;
+        if let Some(next_state) = transition {
+            self.state = next_state;
+        }
     }
 
-    async fn handle_timeout(&mut self, msg: Timeout) {
+    async fn handle_timeout(&mut self, msg: Tick) {
         let transition = self.state.handle_timeout(&mut self.server, msg).await;
         if let Some(next_state) = transition {
             self.state = next_state;
@@ -114,8 +114,8 @@ impl Handler<ClientRequest> for Raft {
 }
 
 #[async_trait::async_trait]
-impl Handler<Timeout> for Raft {
-    async fn handle(&mut self, _self_ref: &ModuleRef<Self>, msg: Timeout) {
+impl Handler<Tick> for Raft {
+    async fn handle(&mut self, _self_ref: &ModuleRef<Self>, msg: Tick) {
         self.handle_timeout(msg).await;
     }
 }

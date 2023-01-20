@@ -16,11 +16,11 @@ pub(crate) struct Timer {
 struct TimerInner {
     raft: ModuleRef<Raft>,
     period: Duration,
-    msg: Timeout,
+    msg: Tick,
 }
 
 impl Timer {
-    pub(crate) fn new(raft: ModuleRef<Raft>, period: Duration, msg: Timeout) -> Timer {
+    pub(crate) fn new(raft: ModuleRef<Raft>, period: Duration, msg: Tick) -> Timer {
         let mut timer = Timer {
             inner: TimerInner { raft, period, msg },
             handle: None,
@@ -31,25 +31,25 @@ impl Timer {
 
     pub(crate) fn new_election_timer(server: &Server) -> Timer {
         let dur = rand::thread_rng().gen_range(server.config.election_timeout_range.clone());
-        Timer::new(server.self_ref(), dur, Timeout::Election)
+        Timer::new(server.self_ref(), dur, Tick::Election)
     }
 
     pub(crate) fn new_minimum_election_timer(server: &Server) -> Timer {
         let dur = *server.config.election_timeout_range.start();
-        Timer::new(server.self_ref(), dur, Timeout::ElectionMinimum)
+        Timer::new(server.self_ref(), dur, Tick::ElectionMinimum)
     }
 
     pub(crate) fn new_heartbeat_timer(server: &Server) -> Timer {
         Timer::new(
             server.self_ref(),
             server.config.heartbeat_timeout,
-            Timeout::Heartbeat,
+            Tick::Heartbeat,
         )
     }
 
     pub(crate) fn new_heartbeat_response_timer(server: &Server) -> Timer {
         let dur = rand::thread_rng().gen_range(server.config.election_timeout_range.clone());
-        Timer::new(server.self_ref(), dur, Timeout::HeartbeatResponse)
+        Timer::new(server.self_ref(), dur, Tick::HeartbeatResponse)
     }
 
     pub(crate) fn reset(&mut self) {
@@ -70,7 +70,7 @@ impl Timer {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum Timeout {
+pub(crate) enum Tick {
     Election,
     ElectionMinimum,
     Heartbeat,

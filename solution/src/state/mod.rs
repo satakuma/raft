@@ -14,7 +14,7 @@ mod leader;
 pub(crate) use leader::Leader;
 
 use crate::domain::*;
-use crate::{Server, Timeout};
+use crate::{Server, Tick};
 
 #[async_trait::async_trait]
 pub(crate) trait RaftState {
@@ -30,9 +30,13 @@ pub(crate) trait RaftState {
         msg: RaftMessage,
     ) -> Option<ServerState>;
 
-    async fn handle_client_req(&mut self, server: &mut Server, req: ClientRequest);
+    async fn handle_client_req(
+        &mut self,
+        server: &mut Server,
+        req: ClientRequest,
+    ) -> Option<ServerState>;
 
-    async fn handle_timeout(&mut self, server: &mut Server, msg: Timeout) -> Option<ServerState>;
+    async fn handle_timeout(&mut self, server: &mut Server, msg: Tick) -> Option<ServerState>;
 }
 
 pub(crate) enum ServerState {
@@ -91,19 +95,24 @@ impl RaftState for ServerState {
         }
     }
 
-    async fn handle_client_req(&mut self, server: &mut Server, req: ClientRequest) {
+    async fn handle_client_req(
+        &mut self,
+        server: &mut Server,
+        req: ClientRequest,
+    ) -> Option<ServerState> {
         if let ClientRequestContent::Snapshot = &req.content {
             server.take_log_snapshot(req.reply_to).await;
+            None
         } else {
             match self {
                 ServerState::Follower(inner) => inner.handle_client_req(server, req).await,
                 ServerState::Candidate(inner) => inner.handle_client_req(server, req).await,
                 ServerState::Leader(inner) => inner.handle_client_req(server, req).await,
-            };
+            }
         }
     }
 
-    async fn handle_timeout(&mut self, server: &mut Server, msg: Timeout) -> Option<ServerState> {
+    async fn handle_timeout(&mut self, server: &mut Server, msg: Tick) -> Option<ServerState> {
         match self {
             ServerState::Follower(inner) => inner.handle_timeout(server, msg).await,
             ServerState::Candidate(inner) => inner.handle_timeout(server, msg).await,

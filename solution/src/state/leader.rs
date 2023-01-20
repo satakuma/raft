@@ -5,9 +5,10 @@ use std::{
 };
 use uuid::Uuid;
 
-use crate::cluster::{ChangeStatus, Delta};
 use crate::domain::*;
-use crate::{snapshot, Follower, RaftState, Server, ServerState, Snapshot, Timeout, Timer};
+use crate::{
+    snapshot, ClientSender, Follower, RaftState, Server, ServerState, Snapshot, Tick, Timer,
+};
 
 pub(crate) struct Leader {
     next_index: HashMap<Uuid, usize>,
@@ -15,9 +16,11 @@ pub(crate) struct Leader {
     snapshot_senders: HashMap<Uuid, snapshot::Sender>,
 
     heartbeat_timer: Timer,
-
-    heartbeat_responders: HashSet<Uuid>,
     heartbeat_response_timer: Timer,
+    heartbeat_responders: HashSet<Uuid>,
+
+    cluster_change: Option<Change>,
+    stepping_down: bool,
 }
 
 impl Leader {
@@ -32,7 +35,15 @@ impl Leader {
         *self.match_index.entry(follower).or_insert(0)
     }
 
-    /// Assumes that required entries to append are present in our log.
+    fn servers<'a>(&'a self, server: &'a Server) -> &'a HashSet<Uuid> {
+        if let Some(chg) = &self.cluster_change {
+            &chg.new_config
+        } else {
+            &server.config.servers
+        }
+    }
+
+    /// Assumes that required entries to append are present in our log (and not in a snapshot).
     async fn send_append_entries_to_follower(&mut self, server: &Server, follower: Uuid) {
         let next_index = self.get_next_index(server, follower);
         let match_index = self.get_match_index(follower);
@@ -76,7 +87,7 @@ impl Leader {
             // Otherwise send our snapshot to this slow follower.
             let snapshot = Snapshot {
                 log: server.log().snapshot().unwrap().clone(),
-                last_config: server.config.servers().clone(),
+                last_config: server.config.servers.clone(),
                 client_sessions: server.client_manager.sessions().clone(),
             };
             let sender =
@@ -87,7 +98,7 @@ impl Leader {
     }
 
     async fn replicate_log(&mut self, server: &mut Server) {
-        for server_id in server.config.servers() {
+        for server_id in &server.config.servers {
             if *server_id != server.config.self_id {
                 self.replicate_log_with_follower(server, *server_id).await;
             }
@@ -98,10 +109,48 @@ impl Leader {
         self.replicate_log(server).await;
     }
 
+    async fn advance_cluster_change(&mut self, server: &mut Server) -> bool {
+        match &mut self.cluster_change {
+            None => false,
+            Some(chg) => match chg.status {
+                ChangeStatus::AwaitingCurrentTerm if server.ready_for_config_change() => {
+                    let log_entry = LogEntry {
+                        term: server.pstate.current_term,
+                        timestamp: SystemTime::now(),
+                        content: LogEntryContent::Configuration {
+                            servers: chg.new_config.clone(),
+                        },
+                    };
+                    server
+                        .pstate
+                        .update_with(|ps| {
+                            ps.log.push(log_entry);
+                        })
+                        .await;
+                    chg.status = ChangeStatus::Commiting {
+                        index: server.log().last_index(),
+                    };
+                    self.replicate_log(server).await;
+                    true
+                }
+                ChangeStatus::Commiting { index } if index <= server.commit_index() => {
+                    let chg = self.cluster_change.take().unwrap();
+                    let _ = chg.sender.send(chg.success_response).await;
+
+                    if !self.included_in_config(server) {
+                        self.stepping_down = true;
+                    }
+                    false
+                }
+                _ => false,
+            },
+        }
+    }
+
     async fn advance_commit_index(&mut self, server: &mut Server) {
         loop {
             // Minimum number of other servers for a majority (we don't count ourself here).
-            let num_majority = server.config.servers().len() / 2;
+            let num_majority = server.config.servers.len() / 2;
             if num_majority > 0 {
                 let mut indexes = self.match_index.values().collect::<Vec<_>>();
                 let majority_index = indexes
@@ -112,30 +161,24 @@ impl Leader {
                 server.update_commit_index(server.log().last_index()).await;
             }
 
-            // Check if we can now advance with a configuration change.
-            if server.config.change_status() == Some(ChangeStatus::WaitingNop)
-                && server.ready_for_config_change()
-            {
-                let log_entry = LogEntry {
-                    term: server.pstate.current_term,
-                    timestamp: SystemTime::now(),
-                    content: LogEntryContent::Configuration {
-                        servers: server.config.servers_updated().unwrap(),
-                    },
-                };
-                server
-                    .pstate
-                    .update_with(|ps| {
-                        ps.log.push(log_entry);
-                    })
-                    .await;
-                self.replicate_log(server).await;
-                server.config.change_replicated(server.log().last_index());
-                continue;
-            } else {
+            // Try to advance with cluster change and optionally advance commit index again.
+            if !self.advance_cluster_change(server).await {
                 break;
             }
         }
+    }
+
+    pub(crate) fn included_in_config(&self, server: &Server) -> bool {
+        self.servers(server).contains(&server.config.self_id)
+    }
+
+    fn heartbeat_response_reset(&mut self, server: &Server) {
+        self.heartbeat_response_timer.reset();
+        self.heartbeat_responders = if self.included_in_config(server) {
+            [server.config.self_id].into()
+        } else {
+            HashSet::new()
+        };
     }
 
     pub(crate) async fn transition_from_canditate(server: &mut Server) -> ServerState {
@@ -149,15 +192,26 @@ impl Leader {
         guard.log.push(noop_entry);
         guard.save().await;
 
-        Leader {
+        let mut leader = Leader {
             next_index: HashMap::new(),
             match_index: HashMap::new(),
             snapshot_senders: HashMap::new(),
             heartbeat_timer: Timer::new_heartbeat_timer(server),
-            heartbeat_responders: [server.config.self_id].into(),
+            heartbeat_responders: HashSet::new(),
             heartbeat_response_timer: Timer::new_heartbeat_response_timer(server),
+            cluster_change: None,
+            stepping_down: false,
+        };
+        leader.heartbeat_response_reset(server);
+        leader.into()
+    }
+
+    fn maybe_step_down(&self, server: &Server) -> Option<ServerState> {
+        if self.stepping_down {
+            Some(Follower::new(server).into())
+        } else {
+            None
         }
-        .into()
     }
 }
 
@@ -217,12 +271,16 @@ impl RaftState for Leader {
                 }
             }
             _ => (),
-        }
+        };
 
-        None
+        self.maybe_step_down(server)
     }
 
-    async fn handle_client_req(&mut self, server: &mut Server, req: ClientRequest) {
+    async fn handle_client_req(
+        &mut self,
+        server: &mut Server,
+        req: ClientRequest,
+    ) -> Option<ServerState> {
         match req.content {
             ClientRequestContent::RegisterClient => {
                 let log_entry = LogEntry {
@@ -241,8 +299,6 @@ impl RaftState for Leader {
                 server
                     .client_manager
                     .prepare_register_client(client_id, req.reply_to);
-                self.replicate_log(server).await;
-                self.advance_commit_index(server).await;
             }
             ClientRequestContent::Command {
                 command,
@@ -270,58 +326,121 @@ impl RaftState for Leader {
                 server
                     .client_manager
                     .prepare_command(client_id, sequence_num, req.reply_to);
-                self.replicate_log(server).await;
-                self.advance_commit_index(server).await;
             }
             ClientRequestContent::AddServer { new_server } => {
-                if server
-                    .config
-                    .new_change(&req.reply_to, Delta::Plus(new_server))
-                    .is_err()
-                {
+                if self.cluster_change.is_some() {
                     let response = AddServerResponseArgs {
                         new_server,
                         content: AddServerResponseContent::ChangeInProgress,
                     };
                     let _ = req.reply_to.send(response.into()).await;
-                } else {
-                    // catch up
+                    return None;
                 }
+
+                let mut new_config = server.config.servers.clone();
+                if !new_config.insert(new_server) {
+                    let response = AddServerResponseArgs {
+                        new_server,
+                        content: AddServerResponseContent::AlreadyPresent,
+                    };
+                    let _ = req.reply_to.send(response.into()).await;
+                    return None;
+                }
+
+                let success_response = AddServerResponseArgs {
+                    new_server,
+                    content: AddServerResponseContent::ServerAdded,
+                }
+                .into();
+                self.cluster_change = Some(Change {
+                    success_response,
+                    sender: req.reply_to,
+                    new_config,
+                    status: ChangeStatus::AwaitingCurrentTerm, //TODO
+                });
             }
             ClientRequestContent::RemoveServer { old_server } => {
-                if server
-                    .config
-                    .new_change(&req.reply_to, Delta::Minus(old_server))
-                    .is_err()
-                {
+                if self.cluster_change.is_some() {
                     let response = RemoveServerResponseArgs {
                         old_server,
                         content: RemoveServerResponseContent::ChangeInProgress,
                     };
                     let _ = req.reply_to.send(response.into()).await;
+                    return None;
                 }
+
+                let mut new_config = server.config.servers.clone();
+                if !new_config.remove(&old_server) {
+                    let response = RemoveServerResponseArgs {
+                        old_server,
+                        content: RemoveServerResponseContent::NotPresent,
+                    };
+                    let _ = req.reply_to.send(response.into()).await;
+                    return None;
+                }
+                if new_config.is_empty() {
+                    let response = RemoveServerResponseArgs {
+                        old_server,
+                        content: RemoveServerResponseContent::OneServerLeft,
+                    };
+                    let _ = req.reply_to.send(response.into()).await;
+                    return None;
+                }
+
+                let success_response = RemoveServerResponseArgs {
+                    old_server,
+                    content: RemoveServerResponseContent::ServerRemoved,
+                }
+                .into();
+                self.cluster_change = Some(Change {
+                    success_response,
+                    sender: req.reply_to,
+                    new_config,
+                    status: ChangeStatus::AwaitingCurrentTerm,
+                });
             }
             ClientRequestContent::Snapshot => unreachable!(),
-        }
+        };
+
+        self.replicate_log(server).await;
+        self.advance_commit_index(server).await;
+
+        self.maybe_step_down(server)
     }
 
-    async fn handle_timeout(&mut self, server: &mut Server, msg: Timeout) -> Option<ServerState> {
+    async fn handle_timeout(&mut self, server: &mut Server, msg: Tick) -> Option<ServerState> {
         match msg {
-            Timeout::Heartbeat => {
+            Tick::Heartbeat => {
                 self.heartbeat(server).await;
                 self.heartbeat_timer.reset();
-                None
             }
-            Timeout::HeartbeatResponse => {
-                if self.heartbeat_responders.len() <= server.config.servers().len() / 2 {
-                    Some(Follower::new(server).into())
+            Tick::HeartbeatResponse => {
+                if self.heartbeat_responders.len() <= self.servers(server).len() / 2 {
+                    self.stepping_down = true;
                 } else {
                     self.heartbeat_response_timer.reset();
                     self.heartbeat_responders = [server.config.self_id].into();
-                    None
                 }
             }
-            _ => None,
-        }
+            _ => {}
+        };
+
+        self.maybe_step_down(server)
     }
+}
+
+struct Change {
+    success_response: ClientRequestResponse,
+    sender: ClientSender,
+    new_config: HashSet<Uuid>,
+    status: ChangeStatus,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum ChangeStatus {
+    CatchingUp,
+    AwaitingCurrentTerm,
+    Commiting {
+        index: usize, // waiting for this entry
+    },
 }

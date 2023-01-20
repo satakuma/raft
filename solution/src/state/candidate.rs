@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::domain::*;
-use crate::{Follower, Leader, RaftState, Server, ServerState, Timeout, Timer};
+use crate::{Follower, Leader, RaftState, Server, ServerState, Tick, Timer};
 
 pub(crate) struct Candidate {
     ballot_box: BallotBox,
@@ -18,10 +18,9 @@ impl Candidate {
                 ps.voted_for = Some(server.config.self_id);
             })
             .await;
-        server.config.discard_change();
 
         let mut candidate = Candidate {
-            ballot_box: BallotBox::new(server.config.servers().len()),
+            ballot_box: BallotBox::new(server.config.servers.len()),
             _election_timer: Timer::new_election_timer(server),
         };
 
@@ -86,13 +85,18 @@ impl RaftState for Candidate {
         }
     }
 
-    async fn handle_client_req(&mut self, server: &mut Server, req: ClientRequest) {
+    async fn handle_client_req(
+        &mut self,
+        server: &mut Server,
+        req: ClientRequest,
+    ) -> Option<ServerState> {
         server.respond_not_leader(req, None).await;
+        None
     }
 
-    async fn handle_timeout(&mut self, server: &mut Server, msg: Timeout) -> Option<ServerState> {
+    async fn handle_timeout(&mut self, server: &mut Server, msg: Tick) -> Option<ServerState> {
         match msg {
-            Timeout::Election => Some(Candidate::loop_from_candidate(server).await),
+            Tick::Election => Some(Candidate::loop_from_candidate(server).await),
             _ => None,
         }
     }

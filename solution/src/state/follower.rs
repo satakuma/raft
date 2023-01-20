@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use crate::domain::*;
-use crate::{snapshot, Candidate, RaftState, Server, ServerState, Timeout, Timer};
+use crate::{snapshot, Candidate, RaftState, Server, ServerState, Tick, Timer};
 
 pub(crate) struct Follower {
     leader: Option<Uuid>,
@@ -58,7 +58,6 @@ impl Follower {
                 ps.voted_for = None;
             })
             .await;
-        server.config.discard_change();
         Follower::new(server).into()
     }
 
@@ -174,14 +173,19 @@ impl RaftState for Follower {
         None
     }
 
-    async fn handle_client_req(&mut self, server: &mut Server, req: ClientRequest) {
+    async fn handle_client_req(
+        &mut self,
+        server: &mut Server,
+        req: ClientRequest,
+    ) -> Option<ServerState> {
         server.respond_not_leader(req, self.leader).await;
+        None
     }
 
-    async fn handle_timeout(&mut self, server: &mut Server, msg: Timeout) -> Option<ServerState> {
+    async fn handle_timeout(&mut self, server: &mut Server, msg: Tick) -> Option<ServerState> {
         match msg {
-            Timeout::Election => Some(Candidate::transition_from_follower(server).await),
-            Timeout::ElectionMinimum => {
+            Tick::Election => Some(Candidate::transition_from_follower(server).await),
+            Tick::ElectionMinimum => {
                 self.minimum_election_timer.take();
                 None
             }
