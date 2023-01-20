@@ -112,6 +112,10 @@ impl Server {
         self.pstate.voted_for.is_none() || self.pstate.voted_for == Some(candidate_id)
     }
 
+    pub(crate) fn ready_for_config_change(&self) -> bool {
+        self.log().get_metadata(self.commit_index).unwrap().term == self.pstate.current_term
+    }
+
     pub(crate) fn get_client_id(&self, index: usize) -> Uuid {
         Uuid::from_u128(index as _)
     }
@@ -157,7 +161,9 @@ impl Server {
                     self.client_manager.expire(*client_id, *sequence_num).await;
                 }
             }
-            LogEntryContent::Configuration { .. } => {}
+            LogEntryContent::Configuration { servers } => {
+                self.config.config_committed(index, servers).await;
+            }
             LogEntryContent::RegisterClient => {
                 let client_id = self.get_client_id(index);
                 self.client_manager

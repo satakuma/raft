@@ -18,6 +18,7 @@ impl Candidate {
                 ps.voted_for = Some(server.config.self_id);
             })
             .await;
+        server.config.discard_change();
 
         let mut candidate = Candidate {
             ballot_box: BallotBox::new(server.config.servers().len()),

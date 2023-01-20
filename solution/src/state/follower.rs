@@ -58,6 +58,7 @@ impl Follower {
                 ps.voted_for = None;
             })
             .await;
+        server.config.discard_change();
         Follower::new(server).into()
     }
 

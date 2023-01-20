@@ -5,6 +5,7 @@ use std::{
 };
 use uuid::Uuid;
 
+use crate::cluster::{ChangeStatus, Delta};
 use crate::domain::*;
 use crate::{snapshot, Follower, RaftState, Server, ServerState, Snapshot, Timeout, Timer};
 
@@ -20,10 +21,21 @@ pub(crate) struct Leader {
 }
 
 impl Leader {
+    fn get_next_index(&mut self, server: &Server, follower: Uuid) -> usize {
+        *self
+            .next_index
+            .entry(follower)
+            .or_insert_with(|| server.log().last_index())
+    }
+
+    fn get_match_index(&mut self, follower: Uuid) -> usize {
+        *self.match_index.entry(follower).or_insert(0)
+    }
+
     /// Assumes that required entries to append are present in our log.
-    async fn send_append_entries_to_follower(&self, server: &Server, follower: Uuid) {
-        let next_index = self.next_index[&follower];
-        let match_index = self.match_index[&follower];
+    async fn send_append_entries_to_follower(&mut self, server: &Server, follower: Uuid) {
+        let next_index = self.get_next_index(server, follower);
+        let match_index = self.get_match_index(follower);
 
         let prev_log_index = next_index - 1;
         let prev_log_term = server.log().get_metadata(prev_log_index).unwrap().term;
@@ -58,7 +70,7 @@ impl Leader {
         }
 
         // Check if we have required entires to replicate in the log.
-        if server.log().first_not_snapshotted_index() <= self.next_index[&follower] {
+        if server.log().first_not_snapshotted_index() <= self.get_next_index(server, follower) {
             self.send_append_entries_to_follower(server, follower).await;
         } else {
             // Otherwise send our snapshot to this slow follower.
@@ -87,16 +99,42 @@ impl Leader {
     }
 
     async fn advance_commit_index(&mut self, server: &mut Server) {
-        // Minimum number of other servers for a majority (we don't count ourself here).
-        let num_majority = server.config.servers().len() / 2;
-        if num_majority > 0 {
-            let mut indexes = self.match_index.values().collect::<Vec<_>>();
-            let majority_index = indexes
-                .select_nth_unstable_by(num_majority - 1, |a, b| b.cmp(a))
-                .1;
-            server.update_commit_index(**majority_index).await;
-        } else {
-            server.update_commit_index(server.log().last_index()).await;
+        loop {
+            // Minimum number of other servers for a majority (we don't count ourself here).
+            let num_majority = server.config.servers().len() / 2;
+            if num_majority > 0 {
+                let mut indexes = self.match_index.values().collect::<Vec<_>>();
+                let majority_index = indexes
+                    .select_nth_unstable_by(num_majority - 1, |a, b| b.cmp(a))
+                    .1;
+                server.update_commit_index(**majority_index).await;
+            } else {
+                server.update_commit_index(server.log().last_index()).await;
+            }
+
+            // Check if we can now advance with a configuration change.
+            if server.config.change_status() == Some(ChangeStatus::WaitingNop)
+                && server.ready_for_config_change()
+            {
+                let log_entry = LogEntry {
+                    term: server.pstate.current_term,
+                    timestamp: SystemTime::now(),
+                    content: LogEntryContent::Configuration {
+                        servers: server.config.servers_updated().unwrap(),
+                    },
+                };
+                server
+                    .pstate
+                    .update_with(|ps| {
+                        ps.log.push(log_entry);
+                    })
+                    .await;
+                self.replicate_log(server).await;
+                server.config.change_replicated(server.log().last_index());
+                continue;
+            } else {
+                break;
+            }
         }
     }
 
@@ -111,26 +149,9 @@ impl Leader {
         guard.log.push(noop_entry);
         guard.save().await;
 
-        let next_index = server
-            .config
-            .servers()
-            .iter()
-            .cloned()
-            .filter(|id| *id != server.config.self_id)
-            .map(|s| (s, server.log().last_index()))
-            .collect();
-        let match_index = server
-            .config
-            .servers()
-            .iter()
-            .cloned()
-            .filter(|id| *id != server.config.self_id)
-            .map(|s| (s, 0))
-            .collect();
-
         Leader {
-            next_index,
-            match_index,
+            next_index: HashMap::new(),
+            match_index: HashMap::new(),
             snapshot_senders: HashMap::new(),
             heartbeat_timer: Timer::new_heartbeat_timer(server),
             heartbeat_responders: [server.config.self_id].into(),
@@ -171,7 +192,7 @@ impl RaftState for Leader {
 
                 self.advance_commit_index(server).await;
 
-                if self.next_index[&source] <= server.log().last_index() {
+                if self.get_next_index(server, source) <= server.log().last_index() {
                     self.replicate_log_with_follower(server, source).await;
                 }
             }
@@ -252,8 +273,34 @@ impl RaftState for Leader {
                 self.replicate_log(server).await;
                 self.advance_commit_index(server).await;
             }
-            ClientRequestContent::AddServer { .. } => todo!(),
-            ClientRequestContent::RemoveServer { .. } => todo!(),
+            ClientRequestContent::AddServer { new_server } => {
+                if server
+                    .config
+                    .new_change(&req.reply_to, Delta::Plus(new_server))
+                    .is_err()
+                {
+                    let response = AddServerResponseArgs {
+                        new_server,
+                        content: AddServerResponseContent::ChangeInProgress,
+                    };
+                    let _ = req.reply_to.send(response.into()).await;
+                } else {
+                    // catch up
+                }
+            }
+            ClientRequestContent::RemoveServer { old_server } => {
+                if server
+                    .config
+                    .new_change(&req.reply_to, Delta::Minus(old_server))
+                    .is_err()
+                {
+                    let response = RemoveServerResponseArgs {
+                        old_server,
+                        content: RemoveServerResponseContent::ChangeInProgress,
+                    };
+                    let _ = req.reply_to.send(response.into()).await;
+                }
+            }
             ClientRequestContent::Snapshot => unreachable!(),
         }
     }
