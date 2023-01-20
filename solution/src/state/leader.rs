@@ -35,7 +35,7 @@ impl Leader {
         *self.match_index.entry(follower).or_insert(0)
     }
 
-    fn servers<'a>(&'a self, server: &'a Server) -> &'a HashSet<Uuid> {
+    fn get_servers<'a>(&'a self, server: &'a Server) -> &'a HashSet<Uuid> {
         if let Some(chg) = &self.cluster_change {
             &chg.new_config
         } else {
@@ -70,6 +70,7 @@ impl Leader {
             entries,
             leader_commit: server.commit_index(),
         };
+        //println!("sending append entries to [{:?}] : {:?}", follower, msg);
         server.send(follower, msg.into()).await;
     }
 
@@ -87,7 +88,7 @@ impl Leader {
             // Otherwise send our snapshot to this slow follower.
             let snapshot = Snapshot {
                 log: server.log().snapshot().unwrap().clone(),
-                last_config: server.config.servers.clone(),
+                last_config: server.config.servers.clone(), // use committed config
                 client_sessions: server.client_manager.sessions().clone(),
             };
             let sender =
@@ -98,9 +99,11 @@ impl Leader {
     }
 
     async fn replicate_log(&mut self, server: &mut Server) {
-        for server_id in &server.config.servers {
-            if *server_id != server.config.self_id {
-                self.replicate_log_with_follower(server, *server_id).await;
+        let ids = self.get_servers(server).clone();
+        // let ids = server.config.servers.clone();
+        for server_id in ids {
+            if server_id != server.config.self_id {
+                self.replicate_log_with_follower(server, server_id).await;
             }
         }
     }
@@ -149,19 +152,23 @@ impl Leader {
 
     async fn advance_commit_index(&mut self, server: &mut Server) {
         loop {
-            // Minimum number of other servers for a majority (we don't count ourself here).
-            let num_majority = server.config.servers.len() / 2;
-            if num_majority > 0 {
-                let mut indexes = self.match_index.values().collect::<Vec<_>>();
-                let majority_index = indexes
-                    .select_nth_unstable_by(num_majority - 1, |a, b| b.cmp(a))
-                    .1;
-                server.update_commit_index(**majority_index).await;
-            } else {
-                server.update_commit_index(server.log().last_index()).await;
+            let mut indexes = Vec::new();
+            for follower in self.get_servers(server) {
+                let index = if *follower == server.config.self_id {
+                    server.log().last_index()
+                } else {
+                    self.match_index[follower]
+                };
+                indexes.push(index);
             }
 
-            // Try to advance with cluster change and optionally advance commit index again.
+            let num_quorum = self.get_servers(server).len() / 2 + 1;
+            let quorum_index = indexes
+                .select_nth_unstable_by(num_quorum - 1, |a, b| b.cmp(a))
+                .1;
+            server.update_commit_index(*quorum_index).await;
+
+            // Try to advance with cluster change and optionally update commit index again.
             if !self.advance_cluster_change(server).await {
                 break;
             }
@@ -169,7 +176,7 @@ impl Leader {
     }
 
     pub(crate) fn included_in_config(&self, server: &Server) -> bool {
-        self.servers(server).contains(&server.config.self_id)
+        self.get_servers(server).contains(&server.config.self_id)
     }
 
     fn heartbeat_response_reset(&mut self, server: &Server) {
@@ -182,6 +189,7 @@ impl Leader {
     }
 
     pub(crate) async fn transition_from_canditate(server: &mut Server) -> ServerState {
+        println!("[{:?}] won election", server.config.self_id);
         let mut guard = server.pstate.mutate();
         guard.voted_for = Some(server.config.self_id);
         let noop_entry = LogEntry {
@@ -206,9 +214,10 @@ impl Leader {
         leader.into()
     }
 
-    fn maybe_step_down(&self, server: &Server) -> Option<ServerState> {
+    fn maybe_step_down(&self) -> Option<ServerState> {
         if self.stepping_down {
-            Some(Follower::new(server).into())
+            println!("Stepping down");
+            Some(Follower::new_observer().into())
         } else {
             None
         }
@@ -240,7 +249,7 @@ impl RaftState for Leader {
                 } else {
                     self.next_index.insert(
                         source,
-                        min(server.log().last_index() + 1, self.next_index[&source] - 1),
+                        (self.next_index[&source] - 1).clamp(1, server.log().last_index() + 1),
                     );
                 }
 
@@ -273,7 +282,7 @@ impl RaftState for Leader {
             _ => (),
         };
 
-        self.maybe_step_down(server)
+        self.maybe_step_down()
     }
 
     async fn handle_client_req(
@@ -405,7 +414,7 @@ impl RaftState for Leader {
         self.replicate_log(server).await;
         self.advance_commit_index(server).await;
 
-        self.maybe_step_down(server)
+        self.maybe_step_down()
     }
 
     async fn handle_timeout(&mut self, server: &mut Server, msg: Tick) -> Option<ServerState> {
@@ -415,8 +424,8 @@ impl RaftState for Leader {
                 self.heartbeat_timer.reset();
             }
             Tick::HeartbeatResponse => {
-                if self.heartbeat_responders.len() <= self.servers(server).len() / 2 {
-                    self.stepping_down = true;
+                if self.heartbeat_responders.len() <= self.get_servers(server).len() / 2 {
+                    return Some(Follower::new(server).into());
                 } else {
                     self.heartbeat_response_timer.reset();
                     self.heartbeat_responders = [server.config.self_id].into();
@@ -424,8 +433,7 @@ impl RaftState for Leader {
             }
             _ => {}
         };
-
-        self.maybe_step_down(server)
+        None
     }
 }
 

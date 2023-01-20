@@ -40,6 +40,16 @@ impl Follower {
         }
     }
 
+    // Follower which will not start a new election.
+    pub(crate) fn new_observer() -> Follower {
+        Follower {
+            leader: None,
+            snapshot_recv: None,
+            election_timer: None,
+            minimum_election_timer: None,
+        }
+    }
+
     pub(crate) fn new_leader_discovered(server: &Server, leader: Uuid) -> ServerState {
         Follower {
             leader: leader.into(),
